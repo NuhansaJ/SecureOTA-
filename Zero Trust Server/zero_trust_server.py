@@ -95,9 +95,173 @@ def init_database():
         )
     ''')
     
+    # === NEW LOGGING TABLES ===
+    
+    # Device action logs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS device_action_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action_type TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            firmware_name TEXT,
+            token_id TEXT,
+            details TEXT,
+            status TEXT NOT NULL,
+            ip_address TEXT,
+            timestamp TEXT NOT NULL
+        )
+    ''')
+    
+    # Verification event logs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS verification_event_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            firmware_name TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            verification_type TEXT NOT NULL,
+            expected_value TEXT NOT NULL,
+            actual_value TEXT NOT NULL,
+            match_result BOOLEAN NOT NULL,
+            action_taken TEXT NOT NULL,
+            timestamp TEXT NOT NULL
+        )
+    ''')
+    
+    # Device failed attempt logs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS device_failed_attempt_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attempt_type TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            target_resource TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            error_details TEXT,
+            timestamp TEXT NOT NULL
+        )
+    ''')
+    
+    # System event logs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS system_event_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            component TEXT NOT NULL,
+            description TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            additional_data TEXT,
+            timestamp TEXT NOT NULL
+        )
+    ''')
     conn.commit()
     conn.close()
     print(f"[Database] Initialized with Device Auth tables: {DB_FILE}")
+
+# ============= SECURE LOGGING FUNCTIONS =============
+
+def log_device_action(action_type, device_id, firmware_name, token_id, 
+                     details, status, ip_address=None):
+    """
+    Log all device actions
+    
+    action_type: FIRMWARE_REQUEST, FIRMWARE_DOWNLOAD, HASH_VERIFICATION, 
+                 DECRYPTION, INSTALLATION, ROLLBACK
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO device_action_log
+            (action_type, device_id, firmware_name, token_id, details, 
+             status, ip_address, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (action_type, device_id, firmware_name, token_id, details, 
+              status, ip_address, datetime.now().isoformat()))
+        conn.commit()
+        print(f"[Device Log] {action_type} - Device: {device_id} - {status}")
+    except Exception as e:
+        print(f"[Device Log] Error: {e}")
+    finally:
+        conn.close()
+
+def log_verification_event(firmware_name, device_id, verification_type, 
+                          expected_value, actual_value, match_result, 
+                          action_taken):
+    """
+    Log all verification events (hash, signature, attestation)
+    
+    verification_type: HASH_CHECK, SIGNATURE_VERIFY, ATTESTATION, 
+                      CERTIFICATE_VERIFY
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO verification_event_log
+            (firmware_name, device_id, verification_type, expected_value, 
+             actual_value, match_result, action_taken, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (firmware_name, device_id, verification_type, expected_value, 
+              actual_value, match_result, action_taken, datetime.now().isoformat()))
+        conn.commit()
+        result = "PASSED" if match_result else "FAILED"
+        print(f"[Verification Log] {verification_type} - {firmware_name} - {result}")
+    except Exception as e:
+        print(f"[Verification Log] Error: {e}")
+    finally:
+        conn.close()
+
+def log_failed_device_attempt(attempt_type, device_id, target_resource, 
+                             reason, error_details=None):
+    """
+    Log all failed device attempts
+    
+    attempt_type: AUTH_FAILED, PERMISSION_DENIED, DOWNLOAD_FAILED, 
+                  HASH_MISMATCH, DECRYPTION_FAILED, TOKEN_EXPIRED
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO device_failed_attempt_log
+            (attempt_type, device_id, target_resource, reason, 
+             error_details, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (attempt_type, device_id, target_resource, reason, 
+              error_details, datetime.now().isoformat()))
+        conn.commit()
+        print(f"[Device Failed] {attempt_type} - Device: {device_id} - {reason}")
+    except Exception as e:
+        print(f"[Device Failed Log] Error: {e}")
+    finally:
+        conn.close()
+
+def log_system_event(event_type, component, description, severity, 
+                    additional_data=None):
+    """
+    Log system-level events
+    
+    event_type: SERVER_START, SERVER_STOP, CONNECTION_ERROR, 
+                ENCRYPTION_KEY_LOADED, DATABASE_ERROR
+    severity: INFO, WARNING, ERROR, CRITICAL
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO system_event_log
+            (event_type, component, description, severity, additional_data, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (event_type, component, description, severity, 
+              additional_data, datetime.now().isoformat()))
+        conn.commit()
+        print(f"[System Log] {severity} - {event_type} - {component}")
+    except Exception as e:
+        print(f"[System Log] Error: {e}")
+    finally:
+        conn.close()
+
+# ============= END LOGGING FUNCTIONS =============
+
 
 def register_device_certificate(device_id, certificate_path):
     """
@@ -516,7 +680,26 @@ def request_update():
         print(f"[Zero Trust Server] Obtaining JWT token for device...")
         token, token_id, device_fingerprint, auth_success = obtain_jwt_token_from_cloud(device_id, device_cert_path)
         
+        if auth_success:
+            log_device_action(
+                action_type="FIRMWARE_REQUEST",
+                device_id=device_id,
+                firmware_name=firmware_name,
+                token_id=token_id,
+                details=f"Device authenticated successfully. Requesting firmware.",
+                status="AUTH_SUCCESS",
+                ip_address=request.remote_addr
+            )
+
         if not auth_success:
+            log_failed_device_attempt(
+                attempt_type="AUTH_FAILED",
+                device_id=device_id,
+                target_resource="UPDATE_CLOUD_SERVER",
+                reason="Could not obtain JWT token from cloud",
+                error_details="Authentication service unavailable or credentials invalid"
+            )
+
             return jsonify({
                 "status": "error",
                 "message": "Device authentication failed - could not obtain JWT token",
@@ -547,6 +730,15 @@ def request_update():
                 status="FAILED",
                 error_details="JWT authentication failed with cloud server"
             )
+
+            log_failed_device_attempt(
+                attempt_type="AUTH_FAILED",
+                device_id=device_id,
+                target_resource=firmware_name,
+                reason="JWT authentication failed with cloud server",
+                error_details=response.json().get('error', 'Unknown auth error')
+            )
+
             return jsonify({
                 "status": "error",
                 "message": "Authentication failed with cloud server",
@@ -563,6 +755,15 @@ def request_update():
                 status="DENIED",
                 error_details="Device lacks permission to download firmware"
             )
+
+            log_failed_device_attempt(
+                attempt_type="PERMISSION_DENIED",
+                device_id=device_id,
+                target_resource=firmware_name,
+                reason="Device lacks permission to download firmware",
+                error_details=response.json().get('error', 'Unknown permission error')
+            )
+
             return jsonify({
                 "status": "error",
                 "message": "Permission denied - device cannot download firmware",
@@ -612,6 +813,15 @@ def request_update():
         for chunk in response.iter_content(chunk_size=8192):
             encrypted_data += chunk
         
+        log_device_action(
+            action_type="FIRMWARE_DOWNLOAD",
+            device_id=device_id,
+            firmware_name=firmware_name,
+            token_id=token_id,
+            details=f"Firmware downloaded from cloud. Size: {len(encrypted_data)} bytes",
+            status="SUCCESS"
+        )
+        
         # Decrypt firmware
         encryption_key = None  # Load from your encryption system
         try:
@@ -622,6 +832,15 @@ def request_update():
                 f.write(decrypted_data)
             
             print(f"[Zero Trust Server] Firmware decrypted and saved: {firmware_name}")
+
+            log_device_action(
+                action_type="DECRYPTION",
+                device_id=device_id,
+                firmware_name=firmware_name,
+                token_id=token_id,
+                details=f"Firmware decrypted successfully. Saved to: {file_path}",
+                status="SUCCESS"
+            )
             
             # Calculate hash
             calculated_hash = calculate_file_hash(file_path)
@@ -631,6 +850,16 @@ def request_update():
             if received_hash == calculated_hash:
                 print("[Verification] ✅ Hash verification PASSED")
                 
+                log_verification_event(
+                    firmware_name=firmware_name,
+                    device_id=device_id,
+                    verification_type="HASH_CHECK",
+                    expected_value=received_hash,
+                    actual_value=calculated_hash,
+                    match_result=True,
+                    action_taken="ACCEPTED"
+                )
+
                 log_device_auth_action(
                     action="FIRMWARE_DOWNLOAD_SUCCESS",
                     token_id=token_id,
@@ -657,6 +886,24 @@ def request_update():
             else:
                 print("[Verification] ❌ Hash verification FAILED")
                 
+                log_verification_event(
+                    firmware_name=firmware_name,
+                    device_id=device_id,
+                    verification_type="HASH_CHECK",
+                    expected_value=received_hash,
+                    actual_value=calculated_hash,
+                    match_result=False,
+                    action_taken="REJECTED"
+                )
+
+                log_failed_device_attempt(
+                    attempt_type="HASH_MISMATCH",
+                    device_id=device_id,
+                    target_resource=firmware_name,
+                    reason="Downloaded firmware hash does not match expected value",
+                    error_details=f"Expected: {received_hash}, Got: {calculated_hash}"
+                )
+
                 log_device_auth_action(
                     action="HASH_MISMATCH",
                     token_id=token_id,
@@ -681,6 +928,14 @@ def request_update():
                 }), 400
         
         except Exception as decrypt_error:
+            log_failed_device_attempt(
+                attempt_type="DECRYPTION_FAILED",
+                device_id=device_id,
+                target_resource=firmware_name,
+                reason="Failed to decrypt firmware",
+                error_details=str(decrypt_error)
+            )
+
             log_device_auth_action(
                 action="DECRYPTION_FAILED",
                 token_id=token_id,
@@ -788,4 +1043,29 @@ if __name__ == '__main__':
     print("Download Directory:", DOWNLOAD_DIR)
     print("Database File:", DB_FILE)
     print("=" * 50)
+
+    log_system_event(
+        event_type="SERVER_START",
+        component="ZERO_TRUST_SERVER",
+        description="Zero Trust Server starting on port 5000",
+        severity="INFO",
+        additional_data=f"Update Cloud URL: {UPDATE_CLOUD_URL}"
+    )
+    
+    # Log encryption key status
+    if load_encryption_key():
+        log_system_event(
+            event_type="ENCRYPTION_KEY_LOADED",
+            component="ENCRYPTION_MODULE",
+            description="Encryption key loaded successfully",
+            severity="INFO"
+        )
+    else:
+        log_system_event(
+            event_type="ENCRYPTION_ERROR",
+            component="ENCRYPTION_MODULE",
+            description="Failed to load encryption key",
+            severity="ERROR"
+        )
+        
     app.run(host='0.0.0.0', port=5000, debug=True)

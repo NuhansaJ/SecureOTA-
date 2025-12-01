@@ -161,9 +161,175 @@ def init_database():
             is_active BOOLEAN DEFAULT 1
         )
     ''')
+
+# === NEW LOGGING TABLES ===
+    
+    # Firmware action logs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS firmware_action_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action_type TEXT NOT NULL,
+            firmware_name TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            role TEXT NOT NULL,
+            details TEXT,
+            status TEXT NOT NULL,
+            ip_address TEXT,
+            token_id TEXT,
+            timestamp TEXT NOT NULL
+        )
+    ''')
+    
+    # Policy change logs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS policy_change_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            changed_by TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            change_type TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT,
+            affected_entity TEXT NOT NULL,
+            ip_address TEXT,
+            token_id TEXT,
+            timestamp TEXT NOT NULL
+        )
+    ''')
+    
+    # System event logs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS system_event_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            component TEXT NOT NULL,
+            description TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            additional_data TEXT,
+            timestamp TEXT NOT NULL
+        )
+    ''')
+    
+    # Failed attempt logs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS failed_attempt_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attempt_type TEXT NOT NULL,
+            attempted_by TEXT NOT NULL,
+            target_resource TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            timestamp TEXT NOT NULL
+        )
+    ''')
     conn.commit()
     conn.close()
     print(f"[Database] Initialized with Auth tables: {DB_FILE}")
+
+# ============= SECURE LOGGING FUNCTIONS =============
+
+def log_firmware_action(action_type, firmware_name, user_id, username, role, 
+                       details, status, ip_address, token_id=None):
+    """
+    Log all firmware-related actions
+    
+    action_type: UPLOAD, DOWNLOAD, DELETE, LIST, VERIFY, ACCESS_DENIED
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO firmware_action_log
+            (action_type, firmware_name, user_id, username, role, details, 
+             status, ip_address, token_id, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (action_type, firmware_name, user_id, username, role, details, 
+              status, ip_address, token_id, datetime.now().isoformat()))
+        conn.commit()
+        print(f"[Firmware Log] {action_type} - {firmware_name} - {username} - {status}")
+    except Exception as e:
+        print(f"[Firmware Log] Error: {e}")
+    finally:
+        conn.close()
+
+def log_policy_change(changed_by, user_id, role, change_type, old_value, 
+                     new_value, affected_entity, ip_address, token_id):
+    """
+    Log all policy and configuration changes
+    
+    change_type: ROLE_MODIFIED, PERMISSION_CHANGED, USER_ADDED, USER_REMOVED, 
+                 CONFIG_UPDATED, KEY_ROTATED
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO policy_change_log
+            (changed_by, user_id, role, change_type, old_value, new_value, 
+             affected_entity, ip_address, token_id, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (changed_by, user_id, role, change_type, old_value, new_value, 
+              affected_entity, ip_address, token_id, datetime.now().isoformat()))
+        conn.commit()
+        print(f"[Policy Log] {change_type} - By: {changed_by} - Entity: {affected_entity}")
+    except Exception as e:
+        print(f"[Policy Log] Error: {e}")
+    finally:
+        conn.close()
+
+def log_system_event(event_type, component, description, severity, 
+                    additional_data=None):
+    """
+    Log system-level events
+    
+    event_type: SERVER_START, SERVER_STOP, DATABASE_ERROR, ENCRYPTION_ERROR, 
+                CONNECTION_ERROR, THRESHOLD_EXCEEDED
+    severity: INFO, WARNING, ERROR, CRITICAL
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO system_event_log
+            (event_type, component, description, severity, additional_data, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (event_type, component, description, severity, 
+              additional_data, datetime.now().isoformat()))
+        conn.commit()
+        print(f"[System Log] {severity} - {event_type} - {component}")
+    except Exception as e:
+        print(f"[System Log] Error: {e}")
+    finally:
+        conn.close()
+
+def log_failed_attempt(attempt_type, attempted_by, target_resource, 
+                      reason, ip_address, user_agent=None):
+    """
+    Log all failed access/operation attempts
+    
+    attempt_type: INVALID_TOKEN, EXPIRED_TOKEN, MISSING_PERMISSION, 
+                  INVALID_CREDENTIALS, RATE_LIMIT_EXCEEDED, INVALID_HASH
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO failed_attempt_log
+            (attempt_type, attempted_by, target_resource, reason, 
+             ip_address, user_agent, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (attempt_type, attempted_by, target_resource, reason, 
+              ip_address, user_agent, datetime.now().isoformat()))
+        conn.commit()
+        print(f"[Failed Attempt] {attempt_type} - {attempted_by} - {reason}")
+    except Exception as e:
+        print(f"[Failed Attempt Log] Error: {e}")
+    finally:
+        conn.close()
+
+# ============= END LOGGING FUNCTIONS =============
 
 def generate_jwt_token(user_id, username, role, device_fingerprint):
     """
@@ -298,6 +464,15 @@ def require_jwt_auth(required_permission=None):
                     ip_address=request.remote_addr,
                     token_expiry="N/A"
                 )
+
+                log_failed_attempt(
+                        attempt_type="MISSING_PERMISSION",
+                        attempted_by=payload['usr'],
+                        target_resource=f"{request.method} {request.path}",
+                        reason=f"Missing permission: {required_permission}",
+                        ip_address=request.remote_addr
+                    )
+                
                 return jsonify({"error": payload_or_error}), 401
             
             payload = payload_or_error
@@ -407,7 +582,7 @@ for filename in os.listdir(FIRMWARE_DIR):
         store_hash_in_db(filename, file_hash, file_size)
         print(f"[Hashing] Hash calculated and stored for: {filename}")
 
-#NEW ROUTES - ERASE LATER
+
 @app.route('/auth/login', methods=['POST'])
 def auth_login():
     """
@@ -451,6 +626,15 @@ def auth_login():
                 ip_address=request.remote_addr,
                 token_expiry="N/A"
             )
+
+            log_failed_attempt(
+                attempt_type="INVALID_CREDENTIALS",
+                attempted_by=username,
+                target_resource="/auth/login",
+                reason="Invalid username or password",
+                ip_address=request.remote_addr,
+                user_agent=request.headers.get('User-Agent')
+            )
             return jsonify({"error": "Invalid credentials"}), 401
         
         # Generate JWT with device fingerprint binding
@@ -469,7 +653,14 @@ def auth_login():
             ip_address=request.remote_addr,
             token_expiry=expiry
         )
-        
+        log_system_event(
+            event_type="USER_LOGIN",
+            component="AUTH_MODULE",
+            description=f"User {username} logged in successfully",
+            severity="INFO",
+            additional_data=f"Role: {role}, IP: {request.remote_addr}"
+        )
+
         return jsonify({
             "status": "success",
             "token": token,
@@ -616,6 +807,13 @@ def download_firmware(filename):
         file_path = os.path.join(FIRMWARE_DIR, filename)
         
         if not os.path.exists(file_path):
+            log_failed_attempt(
+                attempt_type="INVALID_RESOURCE",
+                attempted_by=request.jwt_payload['usr'],
+                target_resource=filename,
+                reason="Firmware file not found",
+                ip_address=request.remote_addr
+            )
             return jsonify({"error": "Firmware file not found"}), 404
         
         # Get hash from database
@@ -624,12 +822,32 @@ def download_firmware(filename):
         print(f"[Update Cloud Server] Sending encrypted firmware: {filename}")
         print(f"[Hashing] File hash: {file_hash}")
         
+        log_firmware_action(
+            action_type="DOWNLOAD",
+            firmware_name=filename,
+            user_id=request.jwt_payload['sub'],
+            username=request.jwt_payload['usr'],
+            role=request.jwt_payload['role'],
+            details=f"Firmware downloaded successfully. Hash: {file_hash[:16]}...",
+            status="SUCCESS",
+            ip_address=request.remote_addr,
+            token_id=request.jwt_payload['jti']
+        )
+        # === END LOGGING ===
+
         # Return file with hash in response headers
         response = send_file(file_path, as_attachment=True, download_name=filename)
         response.headers['X-File-Hash'] = file_hash
         return response
     
     except Exception as e:
+        log_system_event(
+            event_type="DOWNLOAD_ERROR",
+            component="FIRMWARE_DOWNLOAD",
+            description=f"Error downloading firmware: {filename}",
+            severity="ERROR",
+            additional_data=str(e)
+        )
         return jsonify({"error": str(e)}), 500
 
 @app.route('/firmware/list', methods=['GET'])
@@ -654,6 +872,17 @@ def list_firmware():
             }
             for row in results
         ]
+        log_firmware_action(
+            action_type="LIST",
+            firmware_name="ALL",
+            user_id=request.jwt_payload['sub'],
+            username=request.jwt_payload['usr'],
+            role=request.jwt_payload['role'],
+            details=f"Listed {len(firmware_list)} firmware files",
+            status="SUCCESS",
+            ip_address=request.remote_addr,
+            token_id=request.jwt_payload['jti']
+        )
         
         return jsonify({"available_firmware": firmware_list}), 200
     except Exception as e:
@@ -699,4 +928,13 @@ if __name__ == '__main__':
     print("Firmware Directory:", FIRMWARE_DIR)
     print("Database File:", DB_FILE)
     print("=" * 50)
+
+    log_system_event(
+        event_type="SERVER_START",
+        component="UPDATE_CLOUD_SERVER",
+        description="Update Cloud Server starting on port 8000",
+        severity="INFO",
+        additional_data=f"Firmware Dir: {FIRMWARE_DIR}, DB: {DB_FILE}"
+    )
+    
     app.run(host='0.0.0.0', port=8000, debug=True)
