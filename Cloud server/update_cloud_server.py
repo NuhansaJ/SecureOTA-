@@ -224,8 +224,48 @@ def init_database():
             timestamp TEXT NOT NULL
         )
     ''')
+
+    # IP Access Control Lists
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ip_allowlist (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip_address TEXT UNIQUE NOT NULL,
+        device_id TEXT,
+        description TEXT,
+        added_by TEXT NOT NULL,
+        added_at TEXT NOT NULL,
+        is_active BOOLEAN DEFAULT 1
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ip_blocklist (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip_address TEXT UNIQUE NOT NULL,
+        reason TEXT NOT NULL,
+        blocked_by TEXT NOT NULL,
+        blocked_at TEXT NOT NULL,
+        is_permanent BOOLEAN DEFAULT 1,
+        expires_at TEXT
+     )
+    ''')
+
+    # IP Access Attempt Logs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ip_access_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip_address TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        action TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        reason TEXT,
+        user_agent TEXT,
+        timestamp TEXT NOT NULL
+        )
+    ''')    
     conn.commit()
     conn.close()
+    print(f"[Database] IP Access Control tables initialized")
     print(f"[Database] Initialized with Auth tables: {DB_FILE}")
 
 # ============= SECURE LOGGING FUNCTIONS =============
@@ -330,6 +370,170 @@ def log_failed_attempt(attempt_type, attempted_by, target_resource,
         conn.close()
 
 # ============= END LOGGING FUNCTIONS =============
+
+# ============= IP ACCESS CONTROL FUNCTIONS =============
+
+def log_ip_access_attempt(ip_address, endpoint, action, decision, reason, user_agent=None):
+    """
+    Log all IP-based access attempts
+    
+    decision: ALLOWED, BLOCKED, RATE_LIMITED
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO ip_access_log
+            (ip_address, endpoint, action, decision, reason, user_agent, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (ip_address, endpoint, action, decision, reason, user_agent, datetime.now().isoformat()))
+        conn.commit()
+        print(f"[IP Access] {decision} - {ip_address} - {endpoint}")
+    except Exception as e:
+        print(f"[IP Access Log] Error: {e}")
+    finally:
+        conn.close()
+
+def is_ip_blocked(ip_address):
+    """
+    Check if IP is in blocklist and return block details
+    
+    Returns:
+        Tuple: (is_blocked, reason)
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        # Check for permanent blocks
+        cursor.execute('''
+            SELECT reason, blocked_at FROM ip_blocklist
+            WHERE ip_address = ? AND is_permanent = 1
+        ''', (ip_address,))
+        result = cursor.fetchone()
+        
+        if result:
+            return True, f"IP permanently blocked: {result[0]}"
+        
+        # Check for temporary blocks (with expiry)
+        cursor.execute('''
+            SELECT reason, expires_at FROM ip_blocklist
+            WHERE ip_address = ? AND is_permanent = 0 AND expires_at > ?
+        ''', (ip_address, datetime.now().isoformat()))
+        result = cursor.fetchone()
+        
+        if result:
+            return True, f"IP temporarily blocked until {result[1]}: {result[0]}"
+        
+        return False, None
+    
+    finally:
+        conn.close()
+
+def is_ip_allowed(ip_address):
+    """
+    Check if IP is in allowlist (optional strict mode)
+    
+    Returns:
+        bool: True if allowed or allowlist is empty (permissive mode)
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        # Check if allowlist has entries
+        cursor.execute('SELECT COUNT(*) FROM ip_allowlist WHERE is_active = 1')
+        allowlist_count = cursor.fetchone()[0]
+        
+        # If allowlist is empty, operate in permissive mode (allow all except blocked)
+        if allowlist_count == 0:
+            return True
+        
+        # If allowlist exists, check if IP is in it
+        cursor.execute('''
+            SELECT device_id FROM ip_allowlist
+            WHERE ip_address = ? AND is_active = 1
+        ''', (ip_address,))
+        result = cursor.fetchone()
+        
+        return result is not None
+    
+    finally:
+        conn.close()
+
+def check_ip_access(ip_address, endpoint, action):
+    """
+    Comprehensive IP access control check
+    
+    Returns:
+        Tuple: (is_allowed, reason)
+    """
+    # Priority 1: Check blocklist (highest priority)
+    is_blocked, block_reason = is_ip_blocked(ip_address)
+    if is_blocked:
+        log_ip_access_attempt(
+            ip_address=ip_address,
+            endpoint=endpoint,
+            action=action,
+            decision="BLOCKED",
+            reason=block_reason
+        )
+        return False, block_reason
+    
+    # Priority 2: Check allowlist (if in strict mode)
+    if not is_ip_allowed(ip_address):
+        reason = "IP not in allowlist"
+        log_ip_access_attempt(
+            ip_address=ip_address,
+            endpoint=endpoint,
+            action=action,
+            decision="BLOCKED",
+            reason=reason
+        )
+        return False, reason
+    
+    # If passes all checks, allow access
+    log_ip_access_attempt(
+        ip_address=ip_address,
+        endpoint=endpoint,
+        action=action,
+        decision="ALLOWED",
+        reason="Passed IP access control checks"
+    )
+    return True, "Access allowed"
+
+def require_ip_access_control(f):
+    """
+    Decorator to enforce IP-based access control on routes
+    Apply this BEFORE @require_jwt_auth decorator
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        client_ip = request.remote_addr
+        endpoint = f"{request.method} {request.path}"
+        action = f.__name__
+        
+        # Check IP access
+        is_allowed, reason = check_ip_access(client_ip, endpoint, action)
+        
+        if not is_allowed:
+            log_system_event(
+                event_type="IP_ACCESS_DENIED",
+                component="IP_ACCESS_CONTROL",
+                description=f"Access denied for IP: {client_ip}",
+                severity="WARNING",
+                additional_data=f"Endpoint: {endpoint}, Reason: {reason}"
+            )
+            
+            return jsonify({
+                "error": "Access denied",
+                "reason": reason,
+                "ip_address": client_ip
+            }), 403
+        
+        return f(*args, **kwargs)
+    
+    return decorated_function
+
+# ============= END IP ACCESS CONTROL FUNCTIONS =============
 
 def generate_jwt_token(user_id, username, role, device_fingerprint):
     """
@@ -584,6 +788,7 @@ for filename in os.listdir(FIRMWARE_DIR):
 
 
 @app.route('/auth/login', methods=['POST'])
+@require_ip_access_control
 def auth_login():
     """
     Login endpoint to obtain JWT token
@@ -796,6 +1001,7 @@ def health():
     return jsonify({"status": "Update Cloud Server is running", "port": 8000}), 200
 
 @app.route('/firmware/download/<filename>', methods=['GET'])
+@require_ip_access_control
 @require_jwt_auth(required_permission='firmware:download')
 def download_firmware(filename):
     """
@@ -851,6 +1057,7 @@ def download_firmware(filename):
         return jsonify({"error": str(e)}), 500
 
 @app.route('/firmware/list', methods=['GET'])
+@require_ip_access_control
 @require_jwt_auth(required_permission='firmware:list')
 def list_firmware():
     """
@@ -920,6 +1127,356 @@ def get_key():
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    
+# ============= IP ACCESS CONTROL MANAGEMENT ENDPOINTS =============
+
+@app.route('/admin/ip/allowlist', methods=['POST'])
+@require_ip_access_control
+@require_jwt_auth(required_permission='policy:write')
+def add_to_allowlist():
+    """
+    Add IP to allowlist (requires 'policy:write' permission)
+    
+    Expected JSON:
+    {
+        "ip_address": "192.168.1.100",
+        "device_id": "iot_device_001",
+        "description": "Production IoT Gateway"
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'ip_address' not in data:
+            return jsonify({"error": "ip_address required"}), 400
+        
+        ip_address = data['ip_address']
+        device_id = data.get('device_id', '')
+        description = data.get('description', '')
+        
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                INSERT INTO ip_allowlist
+                (ip_address, device_id, description, added_by, added_at, is_active)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (ip_address, device_id, description, request.jwt_payload['usr'], 
+                  datetime.now().isoformat(), 1))
+            conn.commit()
+            
+            log_policy_change(
+                changed_by=request.jwt_payload['usr'],
+                user_id=request.jwt_payload['sub'],
+                role=request.jwt_payload['role'],
+                change_type="IP_ALLOWLIST_ADDED",
+                old_value=None,
+                new_value=ip_address,
+                affected_entity=f"IP: {ip_address}, Device: {device_id}",
+                ip_address=request.remote_addr,
+                token_id=request.jwt_payload['jti']
+            )
+            
+            return jsonify({
+                "status": "success",
+                "message": f"IP {ip_address} added to allowlist",
+                "ip_address": ip_address,
+                "device_id": device_id
+            }), 200
+        
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "IP already in allowlist"}), 409
+        
+        finally:
+            conn.close()
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/admin/ip/blocklist', methods=['POST'])
+@require_ip_access_control
+@require_jwt_auth(required_permission='policy:write')
+def add_to_blocklist():
+    """
+    Add IP to blocklist (requires 'policy:write' permission)
+    
+    Expected JSON:
+    {
+        "ip_address": "10.0.0.50",
+        "reason": "Suspicious activity detected",
+        "is_permanent": true,
+        "expires_in_hours": 24  (optional, for temporary blocks)
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'ip_address' not in data or 'reason' not in data:
+            return jsonify({"error": "ip_address and reason required"}), 400
+        
+        ip_address = data['ip_address']
+        reason = data['reason']
+        is_permanent = data.get('is_permanent', True)
+        expires_in_hours = data.get('expires_in_hours', None)
+        
+        expires_at = None
+        if not is_permanent and expires_in_hours:
+            expires_at = (datetime.now() + timedelta(hours=expires_in_hours)).isoformat()
+        
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                INSERT INTO ip_blocklist
+                (ip_address, reason, blocked_by, blocked_at, is_permanent, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (ip_address, reason, request.jwt_payload['usr'], 
+                  datetime.now().isoformat(), is_permanent, expires_at))
+            conn.commit()
+            
+            log_policy_change(
+                changed_by=request.jwt_payload['usr'],
+                user_id=request.jwt_payload['sub'],
+                role=request.jwt_payload['role'],
+                change_type="IP_BLOCKLIST_ADDED",
+                old_value=None,
+                new_value=ip_address,
+                affected_entity=f"IP: {ip_address}, Reason: {reason}",
+                ip_address=request.remote_addr,
+                token_id=request.jwt_payload['jti']
+            )
+            
+            log_system_event(
+                event_type="IP_BLOCKED",
+                component="IP_ACCESS_CONTROL",
+                description=f"IP {ip_address} added to blocklist",
+                severity="WARNING",
+                additional_data=f"Reason: {reason}, Permanent: {is_permanent}"
+            )
+            
+            return jsonify({
+                "status": "success",
+                "message": f"IP {ip_address} added to blocklist",
+                "ip_address": ip_address,
+                "is_permanent": is_permanent,
+                "expires_at": expires_at
+            }), 200
+        
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "IP already in blocklist"}), 409
+        
+        finally:
+            conn.close()
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/admin/ip/allowlist/<ip_address>', methods=['DELETE'])
+@require_ip_access_control
+@require_jwt_auth(required_permission='policy:write')
+def remove_from_allowlist(ip_address):
+    """Remove IP from allowlist"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        cursor.execute('DELETE FROM ip_allowlist WHERE ip_address = ?', (ip_address,))
+        
+        if cursor.rowcount == 0:
+            conn.close()
+            return jsonify({"error": "IP not found in allowlist"}), 404
+        
+        conn.commit()
+        conn.close()
+        
+        log_policy_change(
+            changed_by=request.jwt_payload['usr'],
+            user_id=request.jwt_payload['sub'],
+            role=request.jwt_payload['role'],
+            change_type="IP_ALLOWLIST_REMOVED",
+            old_value=ip_address,
+            new_value=None,
+            affected_entity=f"IP: {ip_address}",
+            ip_address=request.remote_addr,
+            token_id=request.jwt_payload['jti']
+        )
+        
+        return jsonify({
+            "status": "success",
+            "message": f"IP {ip_address} removed from allowlist"
+        }), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/admin/ip/blocklist/<ip_address>', methods=['DELETE'])
+@require_ip_access_control
+@require_jwt_auth(required_permission='policy:write')
+def remove_from_blocklist(ip_address):
+    """Remove IP from blocklist (unblock)"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        cursor.execute('DELETE FROM ip_blocklist WHERE ip_address = ?', (ip_address,))
+        
+        if cursor.rowcount == 0:
+            conn.close()
+            return jsonify({"error": "IP not found in blocklist"}), 404
+        
+        conn.commit()
+        conn.close()
+        
+        log_policy_change(
+            changed_by=request.jwt_payload['usr'],
+            user_id=request.jwt_payload['sub'],
+            role=request.jwt_payload['role'],
+            change_type="IP_BLOCKLIST_REMOVED",
+            old_value=ip_address,
+            new_value=None,
+            affected_entity=f"IP: {ip_address}",
+            ip_address=request.remote_addr,
+            token_id=request.jwt_payload['jti']
+        )
+        
+        log_system_event(
+            event_type="IP_UNBLOCKED",
+            component="IP_ACCESS_CONTROL",
+            description=f"IP {ip_address} removed from blocklist",
+            severity="INFO"
+        )
+        
+        return jsonify({
+            "status": "success",
+            "message": f"IP {ip_address} removed from blocklist"
+        }), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/admin/ip/allowlist', methods=['GET'])
+@require_ip_access_control
+@require_jwt_auth(required_permission='audit:read')
+def get_allowlist():
+    """Get all IPs in allowlist"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT ip_address, device_id, description, added_by, added_at, is_active
+            FROM ip_allowlist
+            ORDER BY added_at DESC
+        ''')
+        results = cursor.fetchall()
+        conn.close()
+        
+        allowlist = [
+            {
+                "ip_address": row[0],
+                "device_id": row[1],
+                "description": row[2],
+                "added_by": row[3],
+                "added_at": row[4],
+                "is_active": bool(row[5])
+            }
+            for row in results
+        ]
+        
+        return jsonify({"allowlist": allowlist, "count": len(allowlist)}), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/admin/ip/blocklist', methods=['GET'])
+@require_ip_access_control
+@require_jwt_auth(required_permission='audit:read')
+def get_blocklist():
+    """Get all IPs in blocklist"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT ip_address, reason, blocked_by, blocked_at, is_permanent, expires_at
+            FROM ip_blocklist
+            ORDER BY blocked_at DESC
+        ''')
+        results = cursor.fetchall()
+        conn.close()
+        
+        blocklist = [
+            {
+                "ip_address": row[0],
+                "reason": row[1],
+                "blocked_by": row[2],
+                "blocked_at": row[3],
+                "is_permanent": bool(row[4]),
+                "expires_at": row[5]
+            }
+            for row in results
+        ]
+        
+        return jsonify({"blocklist": blocklist, "count": len(blocklist)}), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/admin/ip/access-logs', methods=['GET'])
+@require_ip_access_control
+@require_jwt_auth(required_permission='audit:read')
+def get_ip_access_logs():
+    """Get IP access attempt logs"""
+    try:
+        limit = request.args.get('limit', 100, type=int)
+        ip_filter = request.args.get('ip_address', None)
+        decision_filter = request.args.get('decision', None)
+        
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        query = '''
+            SELECT ip_address, endpoint, action, decision, reason, timestamp
+            FROM ip_access_log
+            WHERE 1=1
+        '''
+        params = []
+        
+        if ip_filter:
+            query += ' AND ip_address = ?'
+            params.append(ip_filter)
+        
+        if decision_filter:
+            query += ' AND decision = ?'
+            params.append(decision_filter)
+        
+        query += ' ORDER BY timestamp DESC LIMIT ?'
+        params.append(limit)
+        
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        conn.close()
+        
+        logs = [
+            {
+                "ip_address": row[0],
+                "endpoint": row[1],
+                "action": row[2],
+                "decision": row[3],
+                "reason": row[4],
+                "timestamp": row[5]
+            }
+            for row in results
+        ]
+        
+        return jsonify({"ip_access_logs": logs, "count": len(logs)}), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ============= END IP ACCESS CONTROL ENDPOINTS =============
 
 if __name__ == '__main__':
     print("=" * 50)
