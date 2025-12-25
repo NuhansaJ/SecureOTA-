@@ -152,9 +152,43 @@ def init_database():
             timestamp TEXT NOT NULL
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS device_identity (
+            device_id TEXT PRIMARY KEY,
+            public_key TEXT NOT NULL,
+            public_key_format TEXT DEFAULT 'PEM',
+            status TEXT NOT NULL DEFAULT 'active',
+            enrollment_timestamp TEXT NOT NULL,
+            last_seen TEXT,
+            firmware_version TEXT,
+            device_type TEXT,
+            public_key_fingerprint TEXT UNIQUE NOT NULL,
+            enrollment_count INTEGER DEFAULT 1,
+            key_algorithm TEXT DEFAULT 'ECC-P256',
+            created_at TEXT NOT NULL,
+            updated_at TEXT
+        )
+    ''')
+    
+    # Device enrollment audit log (Phase 1)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS device_enrollment_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            public_key_fingerprint TEXT,
+            status TEXT NOT NULL,
+            error_details TEXT,
+            ip_address TEXT,
+            timestamp TEXT NOT NULL
+        )
+    ''')
     conn.commit()
     conn.close()
     print(f"[Database] Initialized with Device Auth tables: {DB_FILE}")
+    print(f"[Database] Phase 1 Device Identity tables initialized")
+
 
 # ============= SECURE LOGGING FUNCTIONS =============
 
@@ -551,6 +585,201 @@ init_database()
 print("[Zero Trust Server] Attempting to load encryption key...")
 if not load_encryption_key():
     print("[Warning] Could not load encryption key. Encrypted operations will fail.")
+
+def validate_ecc_public_key(public_key_pem):
+    """
+    Validate that the public key is in correct PEM format and is an ECC P-256 key
+    
+    Args:
+        public_key_pem (str): Public key in PEM format
+    
+    Returns:
+        tuple: (is_valid, error_message)
+    """
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.backends import default_backend
+        
+        # Try to load the public key
+        public_key = serialization.load_pem_public_key(
+            public_key_pem.encode() if isinstance(public_key_pem, str) else public_key_pem,
+            backend=default_backend()
+        )
+        
+        # Verify it's an ECC key
+        if not isinstance(public_key, ec.EllipticCurvePublicKey):
+            return False, "Key is not an ECC key"
+        
+        # Verify it's using P-256 curve (SECP256R1)
+        if not isinstance(public_key.curve, ec.SECP256R1):
+            return False, f"Invalid curve. Expected P-256, got {public_key.curve.name}"
+        
+        return True, None
+    
+    except ValueError as e:
+        return False, f"Invalid PEM format: {str(e)}"
+    except Exception as e:
+        return False, f"Key validation error: {str(e)}"
+
+
+def generate_public_key_fingerprint(public_key_pem):
+    """
+    Generate SHA-256 fingerprint of public key
+    
+    Args:
+        public_key_pem (str): Public key in PEM format
+    
+    Returns:
+        str: SHA-256 fingerprint (hex)
+    """
+    if isinstance(public_key_pem, str):
+        public_key_pem = public_key_pem.encode()
+    
+    fingerprint = hashlib.sha256(public_key_pem).hexdigest()
+    return fingerprint
+
+
+def check_device_enrollment_status(device_id):
+    """
+    Check if device is already enrolled
+    
+    Args:
+        device_id (str): Device identifier
+    
+    Returns:
+        dict: Device enrollment info or None
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            SELECT device_id, status, enrollment_timestamp, public_key_fingerprint, 
+                   enrollment_count, firmware_version
+            FROM device_identity 
+            WHERE device_id = ?
+        ''', (device_id,))
+        
+        result = cursor.fetchone()
+        
+        if result:
+            return {
+                "device_id": result[0],
+                "status": result[1],
+                "enrollment_timestamp": result[2],
+                "public_key_fingerprint": result[3],
+                "enrollment_count": result[4],
+                "firmware_version": result[5]
+            }
+        return None
+    
+    finally:
+        conn.close()
+
+
+def store_device_identity(device_id, public_key_pem, device_type, firmware_version):
+    """
+    Store device cryptographic identity in database
+    
+    Args:
+        device_id (str): Unique device identifier
+        public_key_pem (str): Device's ECC public key
+        device_type (str): Type of device
+        firmware_version (str): Current firmware version
+    
+    Returns:
+        tuple: (success, message, fingerprint)
+    """
+    try:
+        # Generate fingerprint
+        pub_key_fingerprint = generate_public_key_fingerprint(public_key_pem)
+        timestamp = datetime.now().isoformat()
+        
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        # Check if device already exists
+        existing = check_device_enrollment_status(device_id)
+        
+        if existing:
+            # Re-enrollment: Update existing device
+            cursor.execute('''
+                UPDATE device_identity 
+                SET public_key = ?,
+                    public_key_fingerprint = ?,
+                    firmware_version = ?,
+                    device_type = ?,
+                    enrollment_count = enrollment_count + 1,
+                    updated_at = ?,
+                    last_seen = ?
+                WHERE device_id = ?
+            ''', (public_key_pem, pub_key_fingerprint, firmware_version, 
+                  device_type, timestamp, timestamp, device_id))
+            
+            action = "RE-ENROLLMENT"
+            message = f"Device {device_id} re-enrolled successfully"
+        else:
+            # New enrollment
+            cursor.execute('''
+                INSERT INTO device_identity 
+                (device_id, public_key, public_key_fingerprint, status, 
+                 enrollment_timestamp, last_seen, firmware_version, device_type,
+                 key_algorithm, created_at)
+                VALUES (?, ?, ?, 'active', ?, ?, ?, ?, 'ECC-P256', ?)
+            ''', (device_id, public_key_pem, pub_key_fingerprint, timestamp, 
+                  timestamp, firmware_version, device_type, timestamp))
+            
+            action = "NEW_ENROLLMENT"
+            message = f"Device {device_id} enrolled successfully"
+        
+        conn.commit()
+        conn.close()
+        
+        return True, message, pub_key_fingerprint, action
+    
+    except sqlite3.IntegrityError as e:
+        return False, f"Database integrity error: {str(e)}", None, "ERROR"
+    except Exception as e:
+        return False, f"Storage error: {str(e)}", None, "ERROR"
+
+
+def log_device_enrollment(device_id, action, status, public_key_fingerprint=None, 
+                         error_details=None, ip_address=None):
+    """
+    Log device enrollment events for audit trail
+    
+    Args:
+        device_id (str): Device identifier
+        action (str): Enrollment action (NEW_ENROLLMENT, RE_ENROLLMENT, etc.)
+        status (str): Status (SUCCESS, FAILED, ERROR)
+        public_key_fingerprint (str): Public key fingerprint
+        error_details (str): Error message if failed
+        ip_address (str): Client IP address
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            INSERT INTO device_enrollment_log
+            (device_id, action, public_key_fingerprint, status, error_details, 
+             ip_address, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (device_id, action, public_key_fingerprint, status, error_details,
+              ip_address, datetime.now().isoformat()))
+        
+        conn.commit()
+        
+        print(f"[Enrollment Log] {action} - Device: {device_id} - Status: {status}")
+    
+    except Exception as e:
+        print(f"[Enrollment Log] Error: {e}")
+    
+    finally:
+        conn.close()
+
+
 
 @app.route('/device/register', methods=['POST'])
 def register_device():
@@ -1034,6 +1263,392 @@ def verification_history():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     
+@app.route('/enroll', methods=['POST'])
+def enroll_device_phase1():
+    """
+    Phase 1: Device enrollment endpoint
+    Receives device cryptographic identity (ECC public key)
+    
+    Expected JSON:
+    {
+        "device_id": "iot-device-001",
+        "public_key": "-----BEGIN PUBLIC KEY-----...",
+        "device_type": "IoT_Simulator",
+        "firmware_version": "1.0.0"
+    }
+    
+    Returns:
+        JSON response with enrollment status
+    """
+    try:
+        data = request.get_json()
+        client_ip = request.remote_addr
+        
+        # Validate required fields
+        if not data:
+            return jsonify({
+                "success": False,
+                "message": "No data provided"
+            }), 400
+        
+        required_fields = ['device_id', 'public_key']
+        missing_fields = [field for field in required_fields if field not in data]
+        
+        if missing_fields:
+            error_msg = f"Missing required fields: {', '.join(missing_fields)}"
+            log_device_enrollment(
+                device_id=data.get('device_id', 'UNKNOWN'),
+                action="ENROLLMENT_VALIDATION_FAILED",
+                status="FAILED",
+                error_details=error_msg,
+                ip_address=client_ip
+            )
+            return jsonify({
+                "success": False,
+                "message": error_msg
+            }), 400
+        
+        device_id = data['device_id']
+        public_key_pem = data['public_key']
+        device_type = data.get('device_type', 'Unknown')
+        firmware_version = data.get('firmware_version', '0.0.0')
+        
+        print(f"\n[Phase 1 Enrollment] ========================================")
+        print(f"[Phase 1 Enrollment] Device ID: {device_id}")
+        print(f"[Phase 1 Enrollment] Client IP: {client_ip}")
+        print(f"[Phase 1 Enrollment] Device Type: {device_type}")
+        print(f"[Phase 1 Enrollment] Firmware: {firmware_version}")
+        
+        # Validate public key
+        is_valid, error_msg = validate_ecc_public_key(public_key_pem)
+        
+        if not is_valid:
+            print(f"[Phase 1 Enrollment] ✗ Public key validation FAILED: {error_msg}")
+            log_device_enrollment(
+                device_id=device_id,
+                action="KEY_VALIDATION_FAILED",
+                status="FAILED",
+                error_details=error_msg,
+                ip_address=client_ip
+            )
+            return jsonify({
+                "success": False,
+                "message": f"Invalid public key: {error_msg}"
+            }), 400
+        
+        print(f"[Phase 1 Enrollment] ✓ Public key validation PASSED")
+        
+        # Store device identity
+        success, message, fingerprint, action = store_device_identity(
+            device_id, public_key_pem, device_type, firmware_version
+        )
+        
+        if success:
+            print(f"[Phase 1 Enrollment] ✓ {action} SUCCESSFUL")
+            print(f"[Phase 1 Enrollment] Fingerprint: {fingerprint[:16]}...")
+            
+            # Log successful enrollment
+            log_device_enrollment(
+                device_id=device_id,
+                action=action,
+                status="SUCCESS",
+                public_key_fingerprint=fingerprint,
+                ip_address=client_ip
+            )
+            
+            # Also log to system event log
+            log_system_event(
+                event_type="DEVICE_ENROLLED",
+                component="ENROLLMENT_SERVICE",
+                description=f"Device {device_id} enrolled successfully",
+                severity="INFO",
+                additional_data=f"Fingerprint: {fingerprint[:16]}..."
+            )
+            
+            return jsonify({
+                "success": True,
+                "message": message,
+                "device_id": device_id,
+                "status": "active",
+                "public_key_fingerprint": fingerprint,
+                "timestamp": datetime.now().isoformat(),
+                "action": action
+            }), 200
+        
+        else:
+            print(f"[Phase 1 Enrollment] ✗ Storage FAILED: {message}")
+            log_device_enrollment(
+                device_id=device_id,
+                action="ENROLLMENT_STORAGE_FAILED",
+                status="FAILED",
+                error_details=message,
+                ip_address=client_ip
+            )
+            return jsonify({
+                "success": False,
+                "message": message
+            }), 500
+    
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[Phase 1 Enrollment] ✗ EXCEPTION: {error_msg}")
+        
+        log_device_enrollment(
+            device_id=data.get('device_id', 'UNKNOWN') if data else 'UNKNOWN',
+            action="ENROLLMENT_ERROR",
+            status="ERROR",
+            error_details=error_msg,
+            ip_address=request.remote_addr
+        )
+        
+        return jsonify({
+            "success": False,
+            "message": f"Enrollment error: {error_msg}"
+        }), 500
+
+
+@app.route('/device/<device_id>', methods=['GET'])
+def get_device_identity(device_id):
+    """
+    Query device identity and enrollment status
+    
+    Args:
+        device_id: Device identifier (URL parameter)
+    
+    Returns:
+        JSON with device identity information
+    """
+    try:
+        device_info = check_device_enrollment_status(device_id)
+        
+        if device_info:
+            return jsonify({
+                "success": True,
+                "device": device_info
+            }), 200
+        else:
+            return jsonify({
+                "success": False,
+                "message": f"Device {device_id} not found or not enrolled"
+            }), 404
+    
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"Error retrieving device: {str(e)}"
+        }), 500
+
+
+@app.route('/devices', methods=['GET'])
+def list_enrolled_devices():
+    """
+    List all enrolled devices with their identity information
+    
+    Query parameters:
+        - status: Filter by status (active, quarantine, revoked)
+        - limit: Maximum number of results (default: 50)
+    
+    Returns:
+        JSON list of enrolled devices
+    """
+    try:
+        status_filter = request.args.get('status', None)
+        limit = request.args.get('limit', 50, type=int)
+        
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        if status_filter:
+            cursor.execute('''
+                SELECT device_id, status, enrollment_timestamp, firmware_version,
+                       device_type, public_key_fingerprint, enrollment_count
+                FROM device_identity
+                WHERE status = ?
+                ORDER BY enrollment_timestamp DESC
+                LIMIT ?
+            ''', (status_filter, limit))
+        else:
+            cursor.execute('''
+                SELECT device_id, status, enrollment_timestamp, firmware_version,
+                       device_type, public_key_fingerprint, enrollment_count
+                FROM device_identity
+                ORDER BY enrollment_timestamp DESC
+                LIMIT ?
+            ''', (limit,))
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        devices = [
+            {
+                "device_id": row[0],
+                "status": row[1],
+                "enrollment_timestamp": row[2],
+                "firmware_version": row[3],
+                "device_type": row[4],
+                "public_key_fingerprint": row[5],
+                "enrollment_count": row[6]
+            }
+            for row in results
+        ]
+        
+        return jsonify({
+            "success": True,
+            "count": len(devices),
+            "devices": devices
+        }), 200
+    
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"Error listing devices: {str(e)}"
+        }), 500
+
+
+@app.route('/device/<device_id>/status', methods=['PUT'])
+def update_device_status(device_id):
+    """
+    Update device status (active / quarantine / revoked)
+    
+    Expected JSON:
+    {
+        "status": "quarantine",
+        "reason": "Suspicious activity detected"
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'status' not in data:
+            return jsonify({
+                "success": False,
+                "message": "Status field required"
+            }), 400
+        
+        new_status = data['status']
+        reason = data.get('reason', 'Manual status update')
+        
+        valid_statuses = ['active', 'quarantine', 'revoked']
+        if new_status not in valid_statuses:
+            return jsonify({
+                "success": False,
+                "message": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+            }), 400
+        
+        # Check if device exists
+        device_info = check_device_enrollment_status(device_id)
+        if not device_info:
+            return jsonify({
+                "success": False,
+                "message": f"Device {device_id} not found"
+            }), 404
+        
+        # Update status
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE device_identity
+            SET status = ?, updated_at = ?
+            WHERE device_id = ?
+        ''', (new_status, datetime.now().isoformat(), device_id))
+        
+        conn.commit()
+        conn.close()
+        
+        # Log status change
+        log_device_enrollment(
+            device_id=device_id,
+            action=f"STATUS_CHANGED_TO_{new_status.upper()}",
+            status="SUCCESS",
+            public_key_fingerprint=device_info['public_key_fingerprint'],
+            error_details=reason,
+            ip_address=request.remote_addr
+        )
+        
+        print(f"[Device Status] {device_id} status changed to: {new_status}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Device status updated to {new_status}",
+            "device_id": device_id,
+            "new_status": new_status,
+            "reason": reason
+        }), 200
+    
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"Error updating status: {str(e)}"
+        }), 500
+
+
+@app.route('/enrollment-logs', methods=['GET'])
+def get_enrollment_logs():
+    """
+    Get device enrollment audit logs
+    
+    Query parameters:
+        - device_id: Filter by device (optional)
+        - limit: Maximum results (default: 50)
+    
+    Returns:
+        JSON list of enrollment events
+    """
+    try:
+        device_id_filter = request.args.get('device_id', None)
+        limit = request.args.get('limit', 50, type=int)
+        
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        if device_id_filter:
+            cursor.execute('''
+                SELECT id, device_id, action, public_key_fingerprint, status,
+                       error_details, ip_address, timestamp
+                FROM device_enrollment_log
+                WHERE device_id = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            ''', (device_id_filter, limit))
+        else:
+            cursor.execute('''
+                SELECT id, device_id, action, public_key_fingerprint, status,
+                       error_details, ip_address, timestamp
+                FROM device_enrollment_log
+                ORDER BY timestamp DESC
+                LIMIT ?
+            ''', (limit,))
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        logs = [
+            {
+                "id": row[0],
+                "device_id": row[1],
+                "action": row[2],
+                "public_key_fingerprint": row[3],
+                "status": row[4],
+                "error_details": row[5],
+                "ip_address": row[6],
+                "timestamp": row[7]
+            }
+            for row in results
+        ]
+        
+        return jsonify({
+            "success": True,
+            "count": len(logs),
+            "enrollment_logs": logs
+        }), 200
+    
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"Error retrieving logs: {str(e)}"
+        }), 500
+
 
 if __name__ == '__main__':
     print("=" * 50)
