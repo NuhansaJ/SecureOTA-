@@ -123,16 +123,15 @@ class IoTDeviceSimulator:
         """
         Step 1.3: Send enrollment request to Zero-Trust Server
         Transmits: device_id + public_key (NEVER private key)
-        
+    
         Args:
             server_url (str): URL of the Zero-Trust server enrollment endpoint
         """
-        print(f"\n[{self.device_id}] ========== ENROLLMENT PROCESS ==========")
-        print(f"[{self.device_id}] Preparing enrollment payload...")
-        
+        print(f"\n📋 Preparing Enrollment Payload...")
+    
         # Extract public key in PEM format
         public_key_pem = self.extract_public_key_pem()
-        
+    
         # Create enrollment payload
         enrollment_data = {
             "device_id": self.device_id,
@@ -141,11 +140,17 @@ class IoTDeviceSimulator:
             "device_type": "IoT_Simulator",
             "firmware_version": "1.0.0"
         }
-        
-        print(f"[{self.device_id}] Sending enrollment request to: {server_url}")
-        print(f"[{self.device_id}] Device ID: {self.device_id}")
-        print(f"[{self.device_id}] Public Key (first 100 chars): {public_key_pem[:100]}...")
-        
+    
+        print(f"📊 Enrollment Data:")
+        print(f"   └─ Device ID: {self.device_id}")
+        print(f"   └─ Device Type: IoT_Simulator")
+        print(f"   └─ Firmware Version: 1.0.0")
+        print(f"   └─ Public Key Size: {len(public_key_pem)} characters")
+        print(f"   └─ Public Key Preview: {public_key_pem[:60]}...")
+    
+        print(f"\n🌐 Sending HTTP POST to: {server_url}/enroll")
+        print(f"⏳ Waiting for server response...")
+    
         try:
             # Send POST request to server
             response = requests.post(
@@ -154,26 +159,53 @@ class IoTDeviceSimulator:
                 headers={"Content-Type": "application/json"},
                 timeout=10
             )
-            
+        
+            print(f"\n📨 Server Response Received!")
+            print(f"   └─ HTTP Status Code: {response.status_code}")
+        
             if response.status_code == 200:
                 result = response.json()
-                print(f"[{self.device_id}] ✓ ENROLLMENT SUCCESSFUL")
-                print(f"[{self.device_id}] Server Response: {result.get('message')}")
-                print(f"[{self.device_id}] Device Status: {result.get('status')}")
-                
+            
+                print(f"\n{'─'*70}")
+                print(f"✅ ENROLLMENT SUCCESSFUL!")
+                print(f"{'─'*70}")
+                print(f"📋 Server Response Details:")
+                print(f"   ├─ Message: {result.get('message')}")
+                print(f"   ├─ Device Status: {result.get('status')}")
+                print(f"   ├─ Action: {result.get('action')}")
+                print(f"   ├─ Timestamp: {result.get('timestamp')}")
+                print(f"   └─ Fingerprint: {result.get('public_key_fingerprint', 'N/A')[:32]}...")
+                print(f"{'─'*70}\n")
+            
                 # Save enrollment status locally
                 self._save_enrollment_status(result)
-                
+            
                 return True
             else:
-                print(f"[{self.device_id}] ✗ ENROLLMENT FAILED")
-                print(f"[{self.device_id}] Status Code: {response.status_code}")
-                print(f"[{self.device_id}] Error: {response.text}")
+                print(f"\n{'─'*70}")
+                print(f"❌ ENROLLMENT FAILED")
+                print(f"{'─'*70}")
+                print(f"⚠️  HTTP Status: {response.status_code}")
+                print(f"⚠️  Error Message: {response.text}")
+                print(f"{'─'*70}\n")
                 return False
-                
-        except requests.exceptions.RequestException as e:
-            print(f"[{self.device_id}] ✗ CONNECTION ERROR: {str(e)}")
-            print(f"[{self.device_id}] Make sure Zero-Trust Server is running at: {server_url}")
+            
+        except requests.exceptions.ConnectionError:
+            print(f"\n{'─'*70}")
+            print(f"❌ CONNECTION ERROR")
+            print(f"{'─'*70}")
+            print(f"⚠️  Cannot connect to Zero-Trust Server")
+            print(f"⚠️  Server URL: {server_url}")
+            print(f"⚠️  Make sure the server is running on port 5000")
+            print(f"{'─'*70}\n")
+            return False
+    
+        except Exception as e:
+            print(f"\n{'─'*70}")
+            print(f"❌ ERROR OCCURRED")
+            print(f"{'─'*70}")
+            print(f"⚠️  {str(e)}")
+            print(f"{'─'*70}\n")
             return False
     
     def _save_enrollment_status(self, server_response):
@@ -207,35 +239,61 @@ class IoTDeviceSimulator:
         Step 1: Check for existing keys or generate new ones
         Step 2: Store private key securely
         Step 3: Enroll with server
-        
+    
         Args:
             server_url (str): Zero-Trust server base URL
         """
-        print(f"\n{'='*60}")
-        print(f"PHASE 1: BASELINE CRYPTOGRAPHIC IDENTITY")
-        print(f"Device: {self.device_id}")
-        print(f"{'='*60}\n")
-        
+        print(f"\n{'='*70}")
+        print(f"🚀 STARTING PHASE 1 DEVICE PROVISIONING")
+        print(f"{'='*70}")
+        print(f"📱 Device ID: {self.device_id}")
+        print(f"🌐 Server URL: {server_url}")
+        print(f"{'='*70}\n")
+    
         # Try to load existing key first
         if not self.load_private_key():
-            # No existing key, generate new one
-            print(f"[{self.device_id}] First boot detected - generating new identity...")
-            
+            print(f"\n┌{'─'*68}┐")
+            print(f"│ 🔑 STEP 1: GENERATING ECC KEY PAIR│")
+            print(f"└{'─'*68}┘")
+        
             # Step 1.2: Generate ECC key pair
             self.generate_ecc_keypair()
-            
+        
+            print(f"\n┌{'─'*68}┐")
+            print(f"│ 💾 STEP 2: STORING PRIVATE KEY│")
+            print(f"└{'─'*68}┘")
+        
             # Step 1.2: Store private key
             self.store_private_key()
-        
+
+        else:
+            print(f"\n✅ Using existing ECC key pair from storage")
+    
+        print(f"\n┌{'─'*68}┐")
+        print(f"│ 📤 STEP 3: ENROLLING WITH ZERO-TRUST SERVER                     │")
+        print(f"└{'─'*68}┘")
+    
         # Step 1.3: Enroll with server
         success = self.enroll_with_server(server_url)
-        
+    
         if success:
-            print(f"\n[{self.device_id}] ✓ PROVISIONING COMPLETE")
-            print(f"[{self.device_id}] Device can now cryptographically prove identity")
+            print(f"\n{'='*70}")
+            print(f"✅ ✅ ✅  PROVISIONING SUCCESSFUL  ✅ ✅ ✅")
+            print(f"{'='*70}")
+            print(f"✓ ECC Key Pair Generated (P-256)")
+            print(f"✓ Private Key Stored Securely")
+            print(f"✓ Public Key Sent to Server")
+            print(f"✓ Device Enrolled Successfully")
+            print(f"✓ Device Can Now Prove Identity Cryptographically")
+            print(f"{'='*70}\n")
         else:
-            print(f"\n[{self.device_id}] ✗ PROVISIONING FAILED")
-        
+            print(f"\n{'='*70}")
+            print(f"❌ ❌ ❌  PROVISIONING FAILED  ❌ ❌ ❌")
+            print(f"{'='*70}")
+            print(f"⚠️  Check if Zero-Trust Server is running")
+            print(f"⚠️  Check server URL: {server_url}")
+            print(f"{'='*70}\n")
+    
         return success
 
 

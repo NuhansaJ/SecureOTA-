@@ -1,0 +1,15 @@
+{
+  "device_id": "iot-device-001",
+  "enrolled": true,
+  "enrollment_timestamp": "2025-12-25T15:42:24.657749",
+  "server_response": {
+    "action": "NEW_ENROLLMENT",
+    "device_id": "iot-device-001",
+    "message": "Device iot-device-001 enrolled successfully",
+    "public_key_fingerprint": "1159673f2896c6b556ef6e033638e25f11601430f963d88efb8ea517c73e7bb4",
+    "status": "active",
+    "success": true,
+    "timestamp": "2025-12-25T21:12:24.654495"
+  },
+  "public_key_fingerprint": "1159673f2896c6b556ef6e033638e25f11601430f963d88efb8ea517c73e7bb4"
+}
