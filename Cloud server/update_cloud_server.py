@@ -16,7 +16,6 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 app = Flask(__name__)
 
-#new lines - erase this later
 #JWT Configuration 
 JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'your-secure-secret-key-change-in-production')
 JWT_ALGORITHM = 'HS256'
@@ -66,8 +65,6 @@ ROLE_PERMISSIONS = {
     'auditor': ['audit:read', 'firmware:list'],
     'iot_device': ['firmware:download', 'firmware:verify'],
 }
-
-#UPTO THIS POINT - NEW LINES ADDED - ERASE LATER
 
 
 # Get the directory where this script is located
@@ -124,7 +121,6 @@ def init_database():
             timestamp TEXT NOT NULL
         )
     ''')
-#NEW LINES  
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS auth_audit_log (
             id INTEGER PRIMARY KEY,
@@ -161,8 +157,6 @@ def init_database():
             is_active BOOLEAN DEFAULT 1
         )
     ''')
-
-# === NEW LOGGING TABLES ===
     
     # Firmware action logs
     cursor.execute('''
@@ -369,8 +363,6 @@ def log_failed_attempt(attempt_type, attempted_by, target_resource,
     finally:
         conn.close()
 
-# ============= END LOGGING FUNCTIONS =============
-
 # ============= IP ACCESS CONTROL FUNCTIONS =============
 
 def log_ip_access_attempt(ip_address, endpoint, action, decision, reason, user_agent=None):
@@ -533,7 +525,7 @@ def require_ip_access_control(f):
     
     return decorated_function
 
-# ============= END IP ACCESS CONTROL FUNCTIONS =============
+# ============= jwt tokens =============
 
 def generate_jwt_token(user_id, username, role, device_fingerprint):
     """
@@ -623,6 +615,7 @@ def log_auth_action(token_id, user_id, username, role, action, device_fingerprin
     finally:
         conn.close()
 
+#heart of jwt auth
 def require_jwt_auth(required_permission=None):
     """
     Middleware decorator to validate JWT and check permissions
@@ -721,7 +714,6 @@ def require_jwt_auth(required_permission=None):
         return decorated_function
     return decorator
 
-#UPTO HERE - NEW LINES 
 
 # Calculate hash of a file
 def calculate_file_hash(file_path):
@@ -1039,7 +1031,6 @@ def download_firmware(filename):
             ip_address=request.remote_addr,
             token_id=request.jwt_payload['jti']
         )
-        # === END LOGGING ===
 
         # Return file with hash in response headers
         response = send_file(file_path, as_attachment=True, download_name=filename)
@@ -1476,7 +1467,6 @@ def get_ip_access_logs():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ============= END IP ACCESS CONTROL ENDPOINTS =============
 
 if __name__ == '__main__':
     print("=" * 50)

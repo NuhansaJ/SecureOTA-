@@ -1,15 +1,26 @@
 {
   "device_id": "iot-device-001",
   "enrolled": true,
-  "enrollment_timestamp": "2025-12-25T15:42:24.657749",
+  "phase": 2,
+  "enrollment_timestamp": "2026-01-05T09:02:27.697142",
   "server_response": {
-    "action": "NEW_ENROLLMENT",
+    "action": "PHASE2_RE-ENROLLMENT",
     "device_id": "iot-device-001",
-    "message": "Device iot-device-001 enrolled successfully",
+    "hardware_binding_status": "NEW_HW_BINDING",
+    "hardware_fingerprint": "1cf15c6bdd36d03f647de48ab9685cb05cb860ca58fd7b159d5e0b8afd7e2b1d",
+    "message": "Phase 2 enrollment successful: Device iot-device-001 re-enrolled successfully",
+    "phase": 2,
     "public_key_fingerprint": "1159673f2896c6b556ef6e033638e25f11601430f963d88efb8ea517c73e7bb4",
     "status": "active",
     "success": true,
-    "timestamp": "2025-12-25T21:12:24.654495"
+    "timestamp": "2026-01-05T14:32:27.692714"
   },
-  "public_key_fingerprint": "1159673f2896c6b556ef6e033638e25f11601430f963d88efb8ea517c73e7bb4"
+  "public_key_fingerprint": "1159673f2896c6b556ef6e033638e25f11601430f963d88efb8ea517c73e7bb4",
+  "hardware_fingerprint": "1cf15c6bdd36d03f647de48ab9685cb05cb860ca58fd7b159d5e0b8afd7e2b1d",
+  "hardware_info": {
+    "mcu_uid_preview": "1234567890abcdef",
+    "flash_size": 268435456,
+    "bootloader_crc": "5f4d6c3b",
+    "secure_boot_flag": "Enabled"
+  }
 }
