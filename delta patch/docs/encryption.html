@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>REM — Secure OTA Encryption</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Outfit:wght@300;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-deep: #0a0c10;
+            --bg-card: #12151c;
+            --bg-elevated: #1a1e28;
+            --accent: #00d4aa;
+            --accent-dim: #00a884;
+            --text: #e6eaf0;
+            --text-muted: #8b92a0;
+            --border: #2a3142;
+            --danger: #ff6b6b;
+            --ok: #51cf66;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Outfit', sans-serif;
+            background: var(--bg-deep);
+            color: var(--text);
+            line-height: 1.65;
+            min-height: 100vh;
+        }
+        .grid-bg {
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(0,212,170,0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0,212,170,0.03) 1px, transparent 1px);
+            background-size: 48px 48px;
+            pointer-events: none;
+            z-index: 0;
+        }
+        .gradient-orb {
+            position: fixed;
+            width: 80vmax;
+            height: 80vmax;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(0,212,170,0.08) 0%, transparent 60%);
+            top: -30vmax;
+            right: -30vmax;
+            pointer-events: none;
+            z-index: 0;
+        }
+        .wrap {
+            position: relative;
+            z-index: 1;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem 4rem;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 3rem;
+            padding: 2rem 0;
+        }
+        header h1 {
+            font-size: clamp(2rem, 5vw, 3rem);
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dim) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        header p {
+            color: var(--text-muted);
+            margin-top: 0.75rem;
+            font-size: 1.05rem;
+        }
+        .badge {
+            display: inline-block;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            padding: 0.25rem 0.6rem;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--accent);
+            margin-top: 1rem;
+        }
+        section {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.75rem;
+            margin-bottom: 1.5rem;
+        }
+        section h2 {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: var(--accent);
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        section h2::before {
+            content: '';
+            width: 4px;
+            height: 1.2em;
+            background: var(--accent);
+            border-radius: 2px;
+        }
+        section p, section li {
+            color: var(--text-muted);
+            margin-bottom: 0.75rem;
+        }
+        section ul {
+            list-style: none;
+            padding-left: 0;
+        }
+        section li {
+            padding-left: 1.25rem;
+            position: relative;
+        }
+        section li::before {
+            content: '→';
+            position: absolute;
+            left: 0;
+            color: var(--accent-dim);
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .wire-format {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            background: var(--bg-deep);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+            overflow-x: auto;
+            margin: 1rem 0;
+        }
+        .wire-format table { width: 100%; border-collapse: collapse; }
+        .wire-format th, .wire-format td {
+            text-align: left;
+            padding: 0.4rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .wire-format th { color: var(--accent-dim); font-weight: 600; }
+        .wire-format td { color: var(--text-muted); }
+        .wire-format tr:last-child th, .wire-format tr:last-child td { border-bottom: none; }
+        .comparison {
+            width: 100%;
+            font-size: 0.9rem;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+        .comparison th, .comparison td {
+            padding: 0.65rem 0.85rem;
+            text-align: left;
+            border: 1px solid var(--border);
+        }
+        .comparison th {
+            background: var(--bg-elevated);
+            color: var(--accent);
+            font-weight: 600;
+        }
+        .comparison td { color: var(--text-muted); }
+        .comparison tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+        .comparison .rem-row td { color: var(--text); }
+        .comparison .rem-row td:first-child { font-weight: 600; color: var(--accent); }
+        .yes { color: var(--ok); }
+        .no { color: var(--danger); }
+        .spec-link {
+            color: var(--accent);
+            text-decoration: none;
+            border-bottom: 1px solid transparent;
+            transition: border-color 0.2s;
+        }
+        .spec-link:hover { border-bottom-color: var(--accent); }
+        footer {
+            text-align: center;
+            padding: 2rem 1rem;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="grid-bg"></div>
+    <div class="gradient-orb"></div>
+    <div class="wrap">
+        <header>
+            <h1>REM 1.0</h1>
+            <p>Secure OTA Encryption Method</p>
+            <span class="badge">AES-256-CFB + HMAC-SHA256 + HKDF</span>
+        </header>
+
+        <section>
+            <h2>Abstract</h2>
+            <p>REM (Secure OTA Encryption Method) is a custom encryption protocol designed for secure over-the-air (OTA) firmware updates on resource-constrained devices such as the ESP32. It provides both confidentiality and integrity by combining AES-256-CFB encryption with HMAC-SHA256 authentication and HKDF-SHA256 key derivation. Unlike AEAD schemes that require buffering the full ciphertext for tag verification, REM supports streaming decryption and tag verification in chunks, making it suitable for large patches where device RAM is limited. This document specifies the REM 1.0 wire format, algorithms, security properties, and comparison with related methods.</p>
+        </section>
+
+        <section>
+            <h2>Introduction and problem statement</h2>
+            <p>Firmware updates delivered over the air must be confidential (so only the target device can read them) and authentic (so tampering is detected). Standard solutions such as AES-GCM or ChaCha20-Poly1305 provide both, but verifying their authentication tag typically requires the full ciphertext to be available, which on memory-limited embedded devices (e.g. ESP32) can be impractical for large patches. The project therefore needs an encryption method that (1) provides confidentiality and integrity, (2) allows decryption and verification in a streaming fashion with bounded RAM, and (3) uses separate keys for encryption and authentication. REM 1.0 is a protocol that meets these requirements by using AES-256-CFB for streaming encryption, HMAC-SHA256 for an integrity tag over nonce and ciphertext, and HKDF-SHA256 to derive distinct AES and HMAC keys from a single device key.</p>
+        </section>
+
+        <section>
+            <h2>What is REM?</h2>
+            <p>REM (Secure OTA Encryption Method) is this project’s encryption protocol for over-the-air firmware patches. It provides confidentiality and integrity: data is encrypted so only the device can read it, and a tag ensures that any change to the ciphertext is detected before use.</p>
+            <ul>
+                <li><strong>Confidentiality:</strong> AES-256-CFB encrypts the patch so only the device with the shared key can decrypt it.</li>
+                <li><strong>Integrity:</strong> HMAC-SHA256 over nonce and ciphertext; the device verifies the tag before accepting data.</li>
+                <li><strong>Key separation:</strong> One 32-byte device key is turned into two keys (AES and HMAC) via HKDF-SHA256 so encryption and authentication use different keys.</li>
+                <li><strong>Streaming:</strong> Decryption and HMAC run in chunks on the ESP32, so large patches don’t require loading the whole file into RAM.</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>Methods and algorithms used</h2>
+            <p>REM is a protocol that uses these standard algorithms (no custom ciphers or hashes):</p>
+            <div class="wire-format">
+                <table>
+                    <tr><th>Component</th><th>Algorithm</th><th>Role in REM</th></tr>
+                    <tr><td>Symmetric encryption</td><td>AES-256-CFB</td><td>Encrypts/decrypts patch; 256-bit key, 16-byte nonce, segment size 128. Allows streaming on the device.</td></tr>
+                    <tr><td>Message authentication</td><td>HMAC-SHA256</td><td>32-byte tag over (nonce ‖ ciphertext). Device verifies before using data.</td></tr>
+                    <tr><td>Key derivation</td><td>HKDF-SHA256</td><td>Derives two 32-byte keys from device key: one for AES, one for HMAC. Salt: REM1-OTA-PATCH, context: REM1.</td></tr>
+                    <tr><td>Hashing (inside HMAC)</td><td>SHA-256</td><td>Used inside HMAC for the integrity tag.</td></tr>
+                    <tr><td>Signatures (with REM)</td><td>ECDSA P-256</td><td>Server signs plaintext patch; device verifies. SHA-256 hashes message before signing.</td></tr>
+                    <tr><td>Randomness</td><td>CSPRNG</td><td>Server generates a random 16-byte nonce per encryption.</td></tr>
+                </table>
+            </div>
+        </section>
+
+        <section>
+            <h2>How REM works (step-by-step)</h2>
+            <p><strong>Server (encryption):</strong></p>
+            <ul>
+                <li>Start with the 32-byte device key (shared with the ESP32).</li>
+                <li>Run HKDF-SHA256 to get <code>aes_key</code> and <code>hmac_key</code>.</li>
+                <li>Generate a random 16-byte nonce.</li>
+                <li>Encrypt the plaintext patch with AES-256-CFB using <code>aes_key</code> and the nonce → ciphertext.</li>
+                <li>Compute tag = HMAC-SHA256(<code>hmac_key</code>, nonce ‖ ciphertext).</li>
+                <li>Output: <code>REM1</code> (4 bytes) ‖ nonce (16) ‖ ciphertext ‖ tag (32).</li>
+            </ul>
+            <p><strong>Device (decryption):</strong></p>
+            <ul>
+                <li>Check magic bytes are <code>REM1</code>, then read the 16-byte nonce.</li>
+                <li>Derive the same <code>aes_key</code> and <code>hmac_key</code> from the device key via HKDF.</li>
+                <li>Read ciphertext in chunks; for each chunk: update HMAC, decrypt with AES-CFB, write plaintext (streaming).</li>
+                <li>Read the final 32 bytes as the stored tag; finish HMAC and compare. If mismatch, reject (integrity failure).</li>
+                <li>If match, accept the decrypted data (and in this project, verify ECDSA signature over the plaintext separately).</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>Wire format</h2>
+            <p>Every REM 1.0 payload has this layout:</p>
+            <div class="wire-format">
+                <table>
+                    <tr><th>Field</th><th>Size</th><th>Description</th></tr>
+                    <tr><td>Magic</td><td>4 bytes</td><td><code>REM1</code> (ASCII)</td></tr>
+                    <tr><td>Nonce</td><td>16 bytes</td><td>Random IV for AES-CFB</td></tr>
+                    <tr><td>Ciphertext</td><td>N bytes</td><td>AES-256-CFB(nonce, plaintext)</td></tr>
+                    <tr><td>Tag</td><td>32 bytes</td><td>HMAC-SHA256(hmac_key, nonce ‖ ciphertext)</td></tr>
+                </table>
+            </div>
+            <p>Total length = 4 + 16 + N + 32 = 52 + plaintext length.</p>
+        </section>
+
+        <section>
+            <h2>Parameter summary</h2>
+            <div class="wire-format">
+                <table>
+                    <tr><th>Parameter</th><th>Value</th></tr>
+                    <tr><td>Protocol version</td><td>REM 1.0 (magic <code>REM1</code>)</td></tr>
+                    <tr><td>Device key size</td><td>256 bits (32 bytes)</td></tr>
+                    <tr><td>AES key size</td><td>256 bits (32 bytes, derived)</td></tr>
+                    <tr><td>HMAC key size</td><td>256 bits (32 bytes, derived)</td></tr>
+                    <tr><td>Nonce (IV) size</td><td>128 bits (16 bytes)</td></tr>
+                    <tr><td>AES block size</td><td>128 bits</td></tr>
+                    <tr><td>CFB segment size</td><td>128 bits</td></tr>
+                    <tr><td>Tag size</td><td>256 bits (32 bytes)</td></tr>
+                    <tr><td>HKDF salt</td><td><code>REM1-OTA-PATCH</code> (16 bytes, fixed)</td></tr>
+                    <tr><td>HKDF context</td><td><code>REM1</code> (4 bytes)</td></tr>
+                </table>
+            </div>
+        </section>
+
+        <section>
+            <h2>Key derivation</h2>
+            <p>From the 32-byte device key <code>K</code>:</p>
+            <ul>
+                <li>Salt: <code>REM1-OTA-PATCH</code> (fixed).</li>
+                <li>HKDF-SHA256 with context <code>REM1</code> yields two 32-byte keys: <code>aes_key</code>, <code>hmac_key</code>.</li>
+            </ul>
+            <p>AES key is used for AES-256-CFB; HMAC key is used for the tag. Signatures are unchanged: ECDSA P-256 over SHA-256 hash of the <strong>plaintext</strong> patch (server signs before encrypting).</p>
+        </section>
+
+        <section>
+            <h2>Comparison with other methods</h2>
+            <p>How REM 1.0 compares to other common encryption designs:</p>
+            <table class="comparison">
+                <thead>
+                    <tr>
+                        <th>Method</th>
+                        <th>Confidentiality</th>
+                        <th>Integrity / authentication</th>
+                        <th>Streaming decryption</th>
+                        <th>Typical use</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>AES-256-CFB only</td>
+                        <td class="yes">Yes</td>
+                        <td class="no">No</td>
+                        <td class="yes">Yes</td>
+                        <td>Legacy; no integrity check</td>
+                    </tr>
+                    <tr class="rem-row">
+                        <td>REM 1.0 (this project)</td>
+                        <td class="yes">Yes</td>
+                        <td class="yes">Yes (HMAC)</td>
+                        <td class="yes">Yes</td>
+                        <td>OTA patches on ESP32</td>
+                    </tr>
+                    <tr>
+                        <td>AES-256-GCM</td>
+                        <td class="yes">Yes</td>
+                        <td class="yes">Yes (AEAD)</td>
+                        <td class="no">No*</td>
+                        <td>TLS, general AEAD</td>
+                    </tr>
+                    <tr>
+                        <td>ChaCha20-Poly1305</td>
+                        <td class="yes">Yes</td>
+                        <td class="yes">Yes (AEAD)</td>
+                        <td class="no">No*</td>
+                        <td>TLS, mobile/embedded</td>
+                    </tr>
+                </tbody>
+            </table>
+            <p><small>* Full ciphertext typically needed for tag verification; streaming is possible with extra design.</small></p>
+        </section>
+
+        <section>
+            <h2>How REM is different from others</h2>
+            <ul>
+                <li><strong>Vs plain AES-CFB:</strong> REM adds an HMAC tag and key derivation. AES-CFB alone gives confidentiality but no integrity; REM adds authenticate-then-use so tampering is detected.</li>
+                <li><strong>Vs AES-GCM / ChaCha20-Poly1305:</strong> Those are AEAD (one primitive for encrypt+auth). REM combines AES-CFB (streaming) with a separate HMAC so the device can decrypt and verify in chunks without buffering the whole file—important for large OTA patches on memory-limited ESP32.</li>
+                <li><strong>Vs “encrypt then MAC” with one key:</strong> REM derives two keys (AES and HMAC) from one device key via HKDF, so encryption and authentication use different keys (recommended practice).</li>
+                <li><strong>Versioning:</strong> The <code>REM1</code> magic lets the project introduce a future REM 2.0 without breaking devices that only accept <code>REM1</code>.</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>Why REM for this project?</h2>
+            <ul>
+                <li><strong>Integrity:</strong> Plain AES-CFB does not detect tampering; REM adds an HMAC tag so modified ciphertext is rejected.</li>
+                <li><strong>Key separation:</strong> HKDF gives distinct keys for encryption and MAC, which is good practice.</li>
+                <li><strong>Streaming:</strong> ESP32 can decrypt and verify in chunks, so REM fits the same low-RAM OTA flow as before.</li>
+                <li><strong>Versioning:</strong> The <code>REM1</code> magic allows future protocol versions without breaking old devices.</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>Security properties and threat model</h2>
+            <p><strong>What REM protects against:</strong></p>
+            <ul>
+                <li><strong>Eavesdropping:</strong> AES-256-CFB provides confidentiality; without the device key an attacker cannot recover plaintext from ciphertext.</li>
+                <li><strong>Tampering:</strong> HMAC-SHA256 provides integrity; any change to nonce or ciphertext invalidates the tag and the device rejects the payload.</li>
+                <li><strong>Key reuse across roles:</strong> Encryption and authentication use different keys derived via HKDF (key separation).</li>
+            </ul>
+            <p><strong>Assumptions and scope:</strong> The device key is shared securely and kept secret; REM does not protect against its compromise. The nonce must be unique per encryption (server uses CSPRNG). REM does not provide non-repudiation by itself; in this project ECDSA signatures over the plaintext provide server authenticity.</p>
+        </section>
+
+        <section>
+            <h2>Implementation context</h2>
+            <p><strong>Server:</strong> Python (FastAPI); <code>crypto_utils.rem_encrypt_patch()</code>; PyCryptodome for HKDF, AES, HMAC-SHA256.</p>
+            <p><strong>Device:</strong> ESP32 firmware (C++, mbedTLS); decryption and HMAC verification in chunks (e.g. 1024 bytes) so large patches do not require full file in RAM.</p>
+            <p><strong>Application:</strong> REM encrypts delta (bsdiff) patches; server signs plaintext with ECDSA then encrypts with REM; device verifies tag, stream-decrypts, then verifies ECDSA on plaintext before applying the patch.</p>
+        </section>
+
+        <section>
+            <h2>Limitations</h2>
+            <ul>
+                <li><strong>Nonce reuse:</strong> Same nonce with same key weakens confidentiality; server must use a unique nonce per encryption (e.g. CSPRNG).</li>
+                <li><strong>No built-in key rotation:</strong> Key rotation requires updating the device key on both server and device; REM does not define a key-rotation protocol.</li>
+                <li><strong>Tag verification:</strong> Tag is verified after full ciphertext is processed; if verification fails, decrypted output must be discarded.</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>Conclusion</h2>
+            <p>REM 1.0 is a custom encryption protocol that provides confidentiality and integrity for OTA firmware patches while supporting streaming decryption and tag verification on resource-constrained devices. It uses only standard algorithms (AES-256-CFB, HMAC-SHA256, HKDF-SHA256) and separates encryption and authentication keys via HKDF. The wire format is versioned with a magic header for future evolution. REM is implemented in this project for secure delta updates on the ESP32.</p>
+        </section>
+
+        <section>
+            <h2>References</h2>
+            <ul>
+                <li>NIST SP 800-38A, <em>Recommendation for Block Cipher Modes of Operation: Methods and Techniques</em> (AES-CFB).</li>
+                <li>RFC 2104, <em>HMAC: Keyed-Hashing for Message Authentication</em>.</li>
+                <li>RFC 5869, <em>HMAC-based Extract-and-Expand Key Derivation Function (HKDF)</em>.</li>
+                <li>NIST FIPS 186-4 and related standards for ECDSA (P-256) and SHA-256 used for signatures in this project.</li>
+            </ul>
+            <p>Full protocol specification: <a class="spec-link" href="REM_SPEC.md">REM_SPEC.md</a>.</p>
+        </section>
+
+        <footer>
+            REM 1.0 — Secure OTA Encryption Method · This project
+        </footer>
+    </div>
+</body>
+</html>

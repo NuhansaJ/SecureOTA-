@@ -1,0 +1,11 @@
+{
+  "device_id": "iot-device-001",
+  "old_version": "1.0.0",
+  "new_version": "1.0.1",
+  "patch_sha256": "eb69789c36317e85a3c2250de1784d78be31c1d752416d868f6e7d938b87083d",
+  "patch_size_bytes": 876972,
+  "trust_score_at_download": 100,
+  "status": "applied",
+  "applied_version": "1.0.1",
+  "counter_after_apply": 5
+}
