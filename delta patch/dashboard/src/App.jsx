@@ -154,36 +154,45 @@ function App() {
   }
 
   const deviceList = Object.entries(devices)
-  const currentStepInfo = STEPS[step]
-  const isLastStep = step === STEPS.length - 1
-  const isFirstStep = step === 0
 
   return (
+    
     <div className="app">
-      <header className="header">
-        <div className="header-left">
-          <h1>OTA Update Wizard</h1>
-          <span className={`server-status ${serverOnline === true ? 'online' : serverOnline === false ? 'offline' : ''}`}>
-            {serverOnline === true ? '● Connected' : serverOnline === false ? '○ Offline' : '…'}
-          </span>
-        </div>
-      </header>
+  <header className="header">
+    <div className="header-left">
+      <h1>OTA Update Wizard</h1>
+      <span className={`server-status ${serverOnline === true ? 'online' : serverOnline === false ? 'offline' : ''}`}>
+        {serverOnline === true ? '● Connected' : serverOnline === false ? '○ Offline' : '…'}
+      </span>
+    </div>
 
-      {step < STEPS.length - 1 && (
-        <nav className="wizard-steps">
-          <div className="wizard-progress" style={{ '--progress': `${(step / (STEPS.length - 1)) * 100}%` }} />
-          <ul className="wizard-step-list">
-            {STEPS.filter((s) => s.id < 4).map((s) => (
-              <li key={s.id} className={step === s.id ? 'active' : step > s.id ? 'done' : ''}>
-                <button type="button" className="wizard-step-btn" onClick={() => goToStep(s.id)}>
-                  <span className="wizard-step-num">{s.id + 1}</span>
-                  <span className="wizard-step-title">{s.short}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </nav>
-      )}
+    {/* Zero Trust Monitor link - opens in new tab */}
+    <div className="header-right">
+      <a href="http://localhost:5000/view" target="_blank" rel="noopener noreferrer" className="zt-link">
+        Zero Trust Monitor
+      </a>
+    </div>
+
+  </header>
+
+     {step < STEPS.length - 1 && (
+  <nav className="wizard-steps">
+    <div
+      className="wizard-progress"
+    />)
+    <ul className="wizard-step-list">
+      {STEPS.filter((s) => s.id < 4).map((s) => (
+        <li key={s.id} className={step === s.id ? "active" : step > s.id ? "done" : ""}>
+          <button type="button" className="wizard-step-btn" onClick={() => goToStep(s.id)}>
+            <span className="wizard-step-num">{s.id + 1}</span>
+            <span className="wizard-step-title">{s.short}</span>
+          </button>
+        </li>
+      )
+    )}
+    </ul>
+  </nav>
+)}
 
       {message && (
         <div className={`alert ${message.type}`} role="alert">
@@ -410,6 +419,37 @@ function App() {
           </>
         )}
       </main>
+
+      <style>{`
+        .header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }
+        .header-right {
+          display: flex;
+          align-items: center;
+        }
+        .zt-link {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 8px 16px;
+          background: #1a2a1a;
+          color: #4ec9b0;
+          border: 1px solid #4ec9b0;
+          border-radius: 6px;
+          text-decoration: none;
+          font-size: 13px;
+          font-weight: 600;
+          letter-spacing: 0.3px;
+          transition: background 0.2s, color 0.2s;
+        }
+        .zt-link:hover {
+          background: #4ec9b0;
+          color: #1a2a1a;
+        }
+      `}</style>
     </div>
   )
 }

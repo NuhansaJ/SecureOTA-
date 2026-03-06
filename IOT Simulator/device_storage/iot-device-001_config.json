@@ -2,7 +2,7 @@
   "device_id": "iot-device-001",
   "enrolled": true,
   "phase": 2,
-  "enrollment_timestamp": "2026-03-01T07:16:30.322338",
+  "enrollment_timestamp": "2026-03-06T19:20:18.679159",
   "server_response": {
     "action": "PHASE2_RE-ENROLLMENT",
     "device_id": "iot-device-001",
@@ -15,7 +15,7 @@
     "public_key_fingerprint": "b017204f270f17cbc5966521f4eb4650c846119615d68d05a344edbbbf45425a",
     "status": "active",
     "success": true,
-    "timestamp": "2026-03-01T12:46:30.318712"
+    "timestamp": "2026-03-07T00:50:18.663969"
   },
   "public_key_fingerprint": "b017204f270f17cbc5966521f4eb4650c846119615d68d05a344edbbbf45425a",
   "hardware_fingerprint": "1cf15c6bdd36d03f647de48ab9685cb05cb860ca58fd7b159d5e0b8afd7e2b1d",
