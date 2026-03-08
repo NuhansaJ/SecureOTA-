@@ -664,7 +664,7 @@ def require_jwt_auth(required_permission=None):
 
                 log_failed_attempt(
                         attempt_type="MISSING_PERMISSION",
-                        attempted_by=payload['usr'],
+                        attempted_by="Unknown",
                         target_resource=f"{request.method} {request.path}",
                         reason=f"Missing permission: {required_permission}",
                         ip_address=request.remote_addr
