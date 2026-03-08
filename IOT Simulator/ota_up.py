@@ -3,23 +3,21 @@ ota_update_client.py
 ──────────────────────────────────────────────────────────────────────────────
 OTA Update Client — Phase 6 (patch fetch + apply) for IoTDeviceSimulator.
 
-FIX: Removed re-running Phase 4 inside the OTA flow.
-     Phase 3 (challenge-response) already authenticated the device.
-     The trust score is fetched from the Zero Trust server's DB via
-     /rbac/verify — no new authentication round, no counter reuse.
+FIXED:
+  - Phase 4/5 context-bound proof is now REQUIRED before OTA.
+  - Removed the baseline-70 fallback that bypassed real trust verification.
+  - Trust score is only accepted from the Zero Trust server's DB (phase5_verification_log).
+  - If Phase 4/5 has not been run or trust score < 70, OTA is aborted.
 
 Flow:
-  main() runs Phases 1 → 2 → 3
+  main() runs Phases 1 → 2 → 3 → 4/5
   OTAUpdateClient.run_ota_flow():
-    Step 6.0  → POST /rbac/verify  (DB lookup of latest trust score — no counter touched)
+    Step 6.0  → POST /rbac/verify  (DB lookup of Phase 5 trust score — no score forwarded)
     Step 6.1  → GET  /check_update/
-    Step 6.2  → GET  /get_patch/{old}/{new}/{device_id}?trust_score=N  (RBAC gated)
+    Step 6.2  → GET  /get_patch/{old}/{new}/{device_id}  (RBAC gated — no trust_score param)
     Step 6.3  → GET  /get_signature/{old}/{new}
     Step 6.4  → SHA-256 integrity check
     Step 6.5  → Save to storage + increment monotonic counter
-
-Drop next to iot_device_simulator.py and run:
-    python ota_update_client.py
 ──────────────────────────────────────────────────────────────────────────────
 """
 
@@ -30,7 +28,7 @@ import requests
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 ZERO_TRUST_SERVER_URL  = "http://localhost:5000"
-DELTA_PATCH_SERVER_URL = "http://localhost:8000"   # FastAPI delta patch server
+DELTA_PATCH_SERVER_URL = "http://localhost:8000"
 DEVICE_ID              = "iot-device-001"
 TRUST_THRESHOLD        = 70
 # ─────────────────────────────────────────────────────────────────────────────
@@ -40,16 +38,16 @@ class OTAUpdateClient:
     """
     Phase 6: Secure OTA patch download, gated by Zero Trust RBAC.
 
-    Does NOT re-authenticate the device. Instead it asks the Zero Trust server
-    for the device's most recent trust score (already stored from Phase 3/4)
-    and uses that to gate the patch download.
+    Requires Phase 4/5 to have been completed before calling run_ota_flow().
+    The trust score is fetched exclusively from the Zero Trust server's DB
+    (phase5_verification_log). No caller-supplied scores are used.
     """
 
     def __init__(self, device_simulator, delta_patch_url: str = DELTA_PATCH_SERVER_URL):
-        self.device        = device_simulator
-        self.device_id     = device_simulator.device_id
+        self.device          = device_simulator
+        self.device_id       = device_simulator.device_id
         self.delta_patch_url = delta_patch_url.rstrip("/")
-        self.patch_dir     = os.path.join(device_simulator.storage_path, "patches")
+        self.patch_dir       = os.path.join(device_simulator.storage_path, "patches")
         os.makedirs(self.patch_dir, exist_ok=True)
         self._last_trust_score = None
 
@@ -59,7 +57,12 @@ class OTAUpdateClient:
 
     def run_ota_flow(self, current_version: str, zero_trust_url: str = ZERO_TRUST_SERVER_URL) -> bool:
         """
-        Complete OTA flow without re-authenticating the device.
+        Complete OTA flow.
+
+        REQUIRES Phase 4/5 to have already been run so that a real trust score
+        exists in the Zero Trust server's phase5_verification_log table.
+        This method does NOT re-run Phase 4/5 — call it from main() after those
+        phases complete successfully.
 
         Args:
             current_version: e.g. "1.0.0"
@@ -74,25 +77,27 @@ class OTAUpdateClient:
         print(f"📡 Patch Server   : {self.delta_patch_url}")
         print(f"{'='*70}\n")
 
-        # ── Step 6.0: Get trust score from ZT server (no re-auth) ────────────
+        # ── Step 6.0: Get trust score from ZT server DB (no score forwarded) ─
         print(f"┌{'─'*68}┐")
-        print(f"│ STEP 6.0: FETCHING TRUST SCORE FROM ZERO TRUST SERVER           │")
-        print(f"│ (Device already authenticated in Phase 3 — no re-auth needed)   │")
+        print(f"│ STEP 6.0: FETCHING TRUST SCORE FROM ZERO TRUST SERVER DB       │")
+        print(f"│ (Phase 4/5 must have been completed — score comes from DB only) │")
         print(f"└{'─'*68}┘")
 
         trust_score = self._get_trust_score_from_server(zero_trust_url)
 
         if trust_score is None:
-            print(f"\n❌ Could not retrieve trust score — is the device enrolled?")
+            print(f"\n❌ Could not retrieve trust score.")
+            print(f"   Ensure Phase 4/5 (context-bound proof) was completed before OTA.")
             return False
 
         self._last_trust_score = trust_score
 
         if trust_score < TRUST_THRESHOLD:
-            print(f"\n❌ Trust score {trust_score}/100 below threshold {TRUST_THRESHOLD} — aborting OTA")
+            print(f"\n❌ Trust score {trust_score}/100 below threshold {TRUST_THRESHOLD}.")
+            print(f"   Complete Phase 4/5 successfully before attempting OTA.")
             return False
 
-        print(f"\n✅ Trust score confirmed: {trust_score}/100 (threshold: {TRUST_THRESHOLD})\n")
+        print(f"\n✅ Trust score confirmed from DB: {trust_score}/100 (threshold: {TRUST_THRESHOLD})\n")
 
         # ── Step 6.1: Check for available update ─────────────────────────────
         print(f"┌{'─'*68}┐")
@@ -110,12 +115,13 @@ class OTAUpdateClient:
         new_ver = update_info["new_version"]
         print(f"\n✅ Update available: {old_ver} → {new_ver}\n")
 
-        # ── Step 6.2: Fetch encrypted patch (RBAC gated) ─────────────────────
+        # ── Step 6.2: Fetch encrypted patch (RBAC gated, NO score forwarded) ─
         print(f"┌{'─'*68}┐")
         print(f"│ STEP 6.2: FETCHING ENCRYPTED PATCH (Zero Trust RBAC gated)     │")
+        print(f"│ (Trust score NOT forwarded — Delta server asks ZT server's DB)  │")
         print(f"└{'─'*68}┘")
 
-        patch_bytes, patch_filename = self._fetch_patch(old_ver, new_ver, trust_score)
+        patch_bytes, patch_filename = self._fetch_patch(old_ver, new_ver)
 
         if patch_bytes is None:
             print(f"\n❌ Patch download failed — aborting OTA")
@@ -156,7 +162,7 @@ class OTAUpdateClient:
         print(f"\n{'='*70}")
         print(f"✅ ✅ ✅  OTA COMPLETE  ✅ ✅ ✅")
         print(f"{'='*70}")
-        print(f"✓ Trust score confirmed   ({trust_score}/100 — no re-auth, no counter reuse)")
+        print(f"✓ Trust score verified from ZT DB ({trust_score}/100 — Phase 5 required)")
         print(f"✓ Update available        ({old_ver} → {new_ver})")
         print(f"✓ Encrypted patch fetched ({len(patch_bytes)} bytes)")
         print(f"✓ Signature fetched       ({len(sig_bytes)} bytes)")
@@ -173,20 +179,23 @@ class OTAUpdateClient:
 
     def _get_trust_score_from_server(self, zero_trust_url: str):
         """
-        Step 6.0 — POST /rbac/verify without a trust_score in the body.
-        The Zero Trust server looks up phase5_verification_log for this device.
+        Step 6.0 — POST /rbac/verify WITHOUT a trust_score in the body.
 
-        If the device only did Phase 3 (no Phase 5 row exists yet), the server
-        returns score=0 but device_status='active'. We treat that as a baseline
-        score of 70 — Phase 3 challenge-response is sufficient for OTA access.
+        The Zero Trust server looks up phase5_verification_log exclusively.
+        No fallback score is applied here. If Phase 4/5 was not completed,
+        the server returns score=0 / allowed=False and OTA is aborted.
 
-        Returns int trust score or None on network failure / device not enrolled.
+        Returns int trust score (≥ 0) or None on network failure.
+        Returns None (not 0) only on genuine connectivity problems so the
+        caller can distinguish "server unreachable" from "score too low".
         """
         url     = f"{zero_trust_url}/rbac/verify"
+        # IMPORTANT: do NOT send trust_score in the payload.
+        # The Zero Trust server must derive it from its own DB.
         payload = {"device_id": self.device_id, "action": "get_patch"}
 
         print(f"🌐 POST {url}")
-        print(f"   Querying ZT server for current trust score (DB lookup — no re-auth)")
+        print(f"   Querying ZT server for Phase 5 trust score (DB lookup only — no score forwarded)")
 
         try:
             resp = requests.post(url, json=payload, timeout=10)
@@ -203,18 +212,21 @@ class OTAUpdateClient:
             print(f"   Allowed       : {allowed}")
             print(f"   Reason        : {reason}")
 
-            # Device is enrolled & active but no Phase 5 row yet (Phase 3 only)
-            if status == "active" and score == 0:
-                print(f"\n   ℹ️  No Phase 5 record found — device authenticated via Phase 3.")
-                print(f"   ℹ️  Assigning baseline score of 70 (Phase 3 challenge-response passed).")
-                return 70
-
-            # Device not enrolled or not active
+            # Device not enrolled or suspended
             if status in ("unknown", "quarantine", "revoked"):
                 print(f"\n   ❌ Device status '{status}' — OTA not permitted")
                 return None
 
-            # Normal case — return whatever the server says
+            # Score of 0 with active status means Phase 4/5 was never completed.
+            # We do NOT assign a default — abort and tell the user to run Phase 4/5.
+            if status == "active" and score == 0:
+                print(f"\n   ❌ No Phase 5 record found for this device.")
+                print(f"   ❌ Phase 4/5 (context-bound proof) must be completed before OTA.")
+                print(f"   ❌ Run authenticate_with_context_bound_proof() first.")
+                # Return 0 so run_ota_flow() aborts cleanly with the threshold check
+                return 0
+
+            # Normal case — return the real score from the DB
             return score
 
         except requests.exceptions.ConnectionError:
@@ -250,19 +262,19 @@ class OTAUpdateClient:
             print(f"   ❌ Error: {e}")
             return None
 
-    def _fetch_patch(self, old_ver: str, new_ver: str, trust_score: int):
+    def _fetch_patch(self, old_ver: str, new_ver: str):
         """
-        GET /get_patch/{old}/{new}/{device_id}?trust_score={score}
+        GET /get_patch/{old}/{new}/{device_id}
+        No trust_score query parameter — the delta server asks the ZT server's DB directly.
         Returns (patch_bytes, filename) or (None, None).
         """
-        url    = f"{self.delta_patch_url}/get_patch/{old_ver}/{new_ver}/{self.device_id}"
-        params = {"trust_score": trust_score}
-
+        url = f"{self.delta_patch_url}/get_patch/{old_ver}/{new_ver}/{self.device_id}"
+        # No ?trust_score= param — server must look it up itself
         print(f"🌐 GET {url}")
-        print(f"   Forwarding trust_score={trust_score} → patch server → ZT RBAC")
+        print(f"   No trust_score forwarded — Delta server will query ZT server DB")
 
         try:
-            resp = requests.get(url, params=params, timeout=30, stream=True)
+            resp = requests.get(url, timeout=30, stream=True)
             print(f"   HTTP {resp.status_code}")
 
             if resp.status_code == 403:
@@ -271,6 +283,7 @@ class OTAUpdateClient:
                     print(f"\n   ❌ RBAC DENIED by Zero Trust server")
                     print(f"   Reason      : {detail.get('reason', 'unknown')}")
                     print(f"   Trust score : {detail.get('trust_score', '?')}")
+                    print(f"   Ensure Phase 4/5 was completed and produced a score ≥ {TRUST_THRESHOLD}")
                 except Exception:
                     print(f"\n   ❌ RBAC DENIED (could not parse error response)")
                 return None, None
@@ -394,28 +407,49 @@ def main():
     CURRENT_VERSION = "1.0.0"
 
     print("=" * 70)
-    print("IOT DEVICE SIMULATOR — PHASE 6 OTA DEMO")
+    print("IOT DEVICE SIMULATOR — FULL OTA DEMO (Phases 1 → 2 → 3 → 4/5 → 6)")
     print("=" * 70)
 
     device = IoTDeviceSimulator(device_id=DEVICE_ID)
 
-    # Phase 1 ─────────────────────────────────────────────────────────────────
-    print("\n[1/3] Phase 1: Baseline cryptographic identity")
+    # ── Phase 1: Baseline cryptographic identity ──────────────────────────────
+    print("\n[1/4] Phase 1: Baseline cryptographic identity")
     if not device.provision(ZERO_TRUST_SERVER_URL):
-        print("❌ Phase 1 failed"); return
+        print("❌ Phase 1 failed — cannot proceed")
+        return
 
-    # Phase 2 ─────────────────────────────────────────────────────────────────
-    print("\n[2/3] Phase 2: Hardware-bound identity")
+    # ── Phase 2: Hardware-bound identity ─────────────────────────────────────
+    print("\n[2/4] Phase 2: Hardware-bound identity")
     if not device.provision_phase2(ZERO_TRUST_SERVER_URL):
-        print("❌ Phase 2 failed"); return
+        print("❌ Phase 2 failed — cannot proceed")
+        return
 
-    # Phase 3 ─────────────────────────────────────────────────────────────────
-    print("\n[3/3] Phase 3: Challenge-response authentication")
+    # ── Phase 3: Challenge-response authentication ────────────────────────────
+    print("\n[3/4] Phase 3: Challenge-response authentication")
     if not device.authenticate_with_challenge_response(ZERO_TRUST_SERVER_URL):
-        print("❌ Phase 3 failed"); return
+        print("❌ Phase 3 failed — cannot proceed")
+        return
 
-    # Phase 6: OTA — trust score fetched from ZT server DB, no re-auth ────────
-    print("\n[OTA] Phase 6: Secure patch download")
+    # ── Phase 4/5: Context-bound proof — REQUIRED before OTA ─────────────────
+    # This creates a real trust score (0-100) in the Zero Trust server's
+    # phase5_verification_log table. The OTA flow reads this score from the DB.
+    # If this phase is skipped or fails, the OTA will be rejected.
+    print("\n[4/4] Phase 4/5: Context-bound proof authentication (REQUIRED for OTA)")
+    phase45_success = device.authenticate_with_context_bound_proof(
+        ZERO_TRUST_SERVER_URL,
+        required_contexts=['hw', 'counter', 'time'],
+        increment_counter_on_success=True
+    )
+
+    if not phase45_success:
+        print("❌ Phase 4/5 failed — OTA will be rejected (no valid trust score in DB)")
+        print("   Fix the context-bound proof before attempting firmware updates.")
+        return
+
+    print("\n✅ All authentication phases passed — proceeding to OTA\n")
+
+    # ── Phase 6: OTA — trust score fetched from ZT server DB only ────────────
+    print("\n[OTA] Phase 6: Secure patch download (trust score from DB only)")
     ota = OTAUpdateClient(device, delta_patch_url=DELTA_PATCH_SERVER_URL)
     ota.run_ota_flow(current_version=CURRENT_VERSION, zero_trust_url=ZERO_TRUST_SERVER_URL)
 

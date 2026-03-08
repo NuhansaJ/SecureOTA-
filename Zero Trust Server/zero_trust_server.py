@@ -19,7 +19,7 @@ JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'your-secure-secret-key-change
 JWT_ALGORITHM = 'HS256'
 
 # Should match Update Cloud Server's JWT secret in production
-UPDATE_CLOUD_URL = "http://localhost:8000"
+UPDATE_CLOUD_URL = "http://localhost:9000"
 
 # Store current JWT token for device communication
 CURRENT_JWT_TOKEN = None
@@ -29,7 +29,7 @@ CURRENT_DEVICE_FINGERPRINT = None
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Update Cloud Server configuration
-UPDATE_CLOUD_URL = "http://localhost:8000"
+UPDATE_CLOUD_URL = "http://localhost:9000"
 
 # Directory to store downloaded firmware (inside Zero Trust Server folder)
 DOWNLOAD_DIR = os.path.join(SCRIPT_DIR, "downloaded_firmware")
@@ -4990,25 +4990,28 @@ def rbac_verify():
 
     Expected JSON:
     {
-        "device_id": "esp32_01",
-        "action": "get_patch",
-        "trust_score": 85          # optional: score already computed by Phase 5
+        "device_id": "iot-device-001",
+        "action":    "get_patch"
     }
+
+    NOTE: Any 'trust_score' field in the request body is IGNORED.
+    The trust score is always fetched from phase5_verification_log in the DB.
+    This prevents devices from self-reporting fraudulent trust scores.
 
     Returns:
     {
-        "allowed": true,
-        "trust_score": 85,
+        "allowed":       true,
+        "trust_score":   85,
         "device_status": "active",
-        "reason": "Device authenticated with sufficient trust score"
+        "reason":        "..."
     }
 
     Logic:
-      1. Check device exists and is 'active' in device_identity table.
-      2. Look up the most recent Phase 5 trust score from phase5_verification_log.
-         If trust_score is passed in the request body, that is used instead
-         (the patch server forwards it from the auth flow).
-      3. Allow if trust_score >= TRUST_THRESHOLD (70) AND device is active.
+      1. Check device exists and is 'active' in device_identity.
+      2. Look up the most recent TRUSTED Phase 5 result from phase5_verification_log.
+         If no TRUSTED record exists (Phase 4/5 not completed, or all failed),
+         return allowed=False — no fallback score is applied.
+      3. Allow only if DB trust_score >= TRUST_THRESHOLD (70).
     """
     try:
         data = request.get_json()
@@ -5021,12 +5024,11 @@ def rbac_verify():
             }), 400
 
         device_id = data['device_id']
-        action = data.get('action', 'get_patch')
-        provided_score = data.get('trust_score', None)
+        action    = data.get('action', 'get_patch')
 
         TRUST_THRESHOLD = 70
 
-        # 1. Check device identity & status
+        # ── 1. Check device identity & status ────────────────────────────────
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
 
@@ -5044,10 +5046,10 @@ def rbac_verify():
                 severity="WARNING"
             )
             return jsonify({
-                "allowed": False,
-                "trust_score": 0,
+                "allowed":       False,
+                "trust_score":   0,
                 "device_status": "unknown",
-                "reason": "Device not enrolled"
+                "reason":        "Device not enrolled"
             }), 403
 
         device_status = device_row[0]
@@ -5061,64 +5063,117 @@ def rbac_verify():
                 severity="WARNING"
             )
             return jsonify({
-                "allowed": False,
-                "trust_score": 0,
+                "allowed":       False,
+                "trust_score":   0,
                 "device_status": device_status,
-                "reason": f"Device is {device_status}"
+                "reason":        f"Device is {device_status}"
             }), 403
 
-        # 2. Resolve trust score
-        if provided_score is not None:
-            trust_score = int(provided_score)
-            score_source = "caller"
-        else:
-            # Look up most recent Phase 5 result
-            try:
-                cursor.execute('''
-                    SELECT trust_score FROM phase5_verification_log
-                    WHERE device_id = ? AND overall_result = 'TRUSTED'
-                    ORDER BY timestamp DESC
-                    LIMIT 1
-                ''', (device_id,))
-                score_row = cursor.fetchone()
-                trust_score = score_row[0] if score_row else 0
-                score_source = "phase5_log"
-            except Exception:
-                trust_score = 0
-                score_source = "default"
+        # ── 2. Look up trust score from Phase 5 DB — no caller input accepted ─
+        #
+        # We only consider records where overall_result = 'TRUSTED'.
+        # A failed Phase 5 attempt does not count.
+        # If no TRUSTED record exists the device must re-run Phase 4/5.
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS phase5_verification_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_id TEXT NOT NULL,
+                    overall_result TEXT NOT NULL,
+                    trust_score INTEGER NOT NULL,
+                    step_5_1_status TEXT NOT NULL,
+                    step_5_2_status TEXT NOT NULL,
+                    step_5_3_status TEXT NOT NULL,
+                    verification_report TEXT NOT NULL,
+                    ip_address TEXT,
+                    timestamp TEXT NOT NULL
+                )
+            ''')
+
+            cursor.execute('''
+                SELECT trust_score FROM phase5_verification_log
+                WHERE device_id = ? AND overall_result = 'TRUSTED'
+                ORDER BY timestamp DESC
+                LIMIT 1
+            ''', (device_id,))
+            score_row = cursor.fetchone()
+        except Exception as db_err:
+            conn.close()
+            log_system_event(
+                event_type="RBAC_ERROR",
+                component="RBAC_VERIFY",
+                description=f"DB error looking up Phase 5 score for {device_id}",
+                severity="ERROR",
+                additional_data=str(db_err)
+            )
+            return jsonify({
+                "allowed":       False,
+                "trust_score":   0,
+                "device_status": device_status,
+                "reason":        f"Database error during trust score lookup: {str(db_err)}"
+            }), 500
 
         conn.close()
 
-        # 3. Decision
-        allowed = (trust_score >= TRUST_THRESHOLD)
+        # ── 3. Evaluate the score ─────────────────────────────────────────────
+        if score_row is None:
+            # No TRUSTED Phase 5 record found — Phase 4/5 not completed or all failed
+            log_system_event(
+                event_type="RBAC_DENIED",
+                component="RBAC_VERIFY",
+                description=(
+                    f"Device {device_id} has no TRUSTED Phase 5 record — "
+                    f"{action} denied. Device must complete Phase 4/5 first."
+                ),
+                severity="WARNING",
+                additional_data=f"client_ip={client_ip}"
+            )
+            return jsonify({
+                "allowed":       False,
+                "trust_score":   0,
+                "device_status": device_status,
+                "reason": (
+                    "No Phase 5 TRUSTED verification record found for this device. "
+                    "Complete Phase 4/5 context-bound proof authentication before "
+                    "requesting firmware updates."
+                )
+            }), 403
+
+        trust_score = score_row[0]
+        allowed     = (trust_score >= TRUST_THRESHOLD)
         reason = (
-            f"Trust score {trust_score}/100 >= threshold {TRUST_THRESHOLD}"
+            f"Phase 5 DB trust score {trust_score}/100 >= threshold {TRUST_THRESHOLD}"
             if allowed
-            else f"Trust score {trust_score}/100 below threshold {TRUST_THRESHOLD}"
+            else
+            f"Phase 5 DB trust score {trust_score}/100 below threshold {TRUST_THRESHOLD}"
         )
 
-        # Log the RBAC decision
+        # ── 4. Log the RBAC decision ──────────────────────────────────────────
         log_system_event(
             event_type="RBAC_DECISION",
             component="RBAC_VERIFY",
-            description=f"Device {device_id} action={action} — {'ALLOWED' if allowed else 'DENIED'} (score={trust_score}, source={score_source})",
+            description=(
+                f"Device {device_id} action={action} — "
+                f"{'ALLOWED' if allowed else 'DENIED'} "
+                f"(DB score={trust_score})"
+            ),
             severity="INFO" if allowed else "WARNING",
             additional_data=f"client_ip={client_ip}"
         )
 
         status_code = 200 if allowed else 403
         return jsonify({
-            "allowed": allowed,
-            "trust_score": trust_score,
+            "allowed":       allowed,
+            "trust_score":   trust_score,
             "device_status": device_status,
-            "reason": reason
+            "reason":        reason
         }), status_code
 
     except Exception as e:
         return jsonify({
-            "allowed": False,
+            "allowed":     False,
             "trust_score": 0,
-            "reason": f"RBAC verification error: {str(e)}"
+            "reason":      f"RBAC verification error: {str(e)}"
         }), 500
 
 

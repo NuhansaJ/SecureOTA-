@@ -1097,10 +1097,11 @@ class IoTDeviceSimulator:
         # 2. Monotonic Counter
         if 'counter' in required_contexts:
             print(f"\n[{self.device_id}] 📌 Loading monotonic counter...")
-            counter = self.load_monotonic_counter()
-            context_proof['monotonic_counter'] = counter
-            payload_parts.append(str(counter))
-            print(f"[{self.device_id}]    ✓ Counter value: {counter}")
+            saved_counter = self.load_monotonic_counter()
+            next_counter  = saved_counter + 1
+            context_proof['monotonic_counter'] = next_counter
+            payload_parts.append(str(next_counter))
+            print(f"[{self.device_id}]    ✓ Counter value: {next_counter}")
         
         # 3. Device Timestamp
         if 'time' in required_contexts:
@@ -1287,7 +1288,8 @@ class IoTDeviceSimulator:
                 # This prevents replay attacks on next authentication attempt
                 if increment_counter_on_success and 'counter' in required_contexts:
                     print(f"\n[CB-CCR] 🔄 Incrementing monotonic counter after successful auth...")
-                    new_counter = self.increment_monotonic_counter()
+                    sent_counter = context_proof.get('monotonic_counter')
+                    new_counter = self.save_monotonic_counter(sent_counter)
                     print(f"[CB-CCR] ✅ Counter incremented to: {new_counter}")
                     print(f"[CB-CCR] Next authentication will use counter: {new_counter}")
                 
@@ -1514,7 +1516,7 @@ def main():
     phase4_test3 = device.authenticate_with_context_bound_proof(
         ZERO_TRUST_SERVER_URL,
         required_contexts=['hw', 'counter', 'time', 'firmware'],
-        increment_counter_on_success=True  # Increment after success
+        increment_counter_on_success=False  # Increment after success
     )
     
     # ============================================================================

@@ -28,10 +28,10 @@ DEVICE_AES_KEY = bytes([
     0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF
 ])
 
-# ─── Zero Trust integration ──────────────────────────────────────────────────
-ZERO_TRUST_URL = os.environ.get("ZERO_TRUST_URL", "http://localhost:5000")
-ZERO_TRUST_TIMEOUT = 5.0          # seconds; fail-closed if ZT server is slow
-RBAC_TRUST_THRESHOLD = 70         # must match zero_trust_server.py
+# ─── Zero Trust integration ───────────────────────────────────────────────────
+ZERO_TRUST_URL     = os.environ.get("ZERO_TRUST_URL", "http://localhost:5000")
+ZERO_TRUST_TIMEOUT = 5.0   # seconds; fail-closed if ZT server is slow
+RBAC_TRUST_THRESHOLD = 70  # must match zero_trust_server.py TRUST_THRESHOLD
 # ─────────────────────────────────────────────────────────────────────────────
 
 DEVICES = {
@@ -45,29 +45,40 @@ for directory in [FIRMWARE_DIR, PATCHES_DIR, SIGNATURES_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
 
-# ─── Helper: ask Zero Trust server whether this device may fetch a patch ─────
+# ─── Helper: ask Zero Trust server whether this device may fetch a patch ──────
 
-async def check_rbac(device_id: str, action: str = "get_patch", trust_score: int | None = None) -> dict:
+async def check_rbac(device_id: str, action: str = "get_patch") -> dict:
     """
     Call /rbac/verify on the Zero Trust server.
+
+    IMPORTANT: We do NOT forward a trust_score. The Zero Trust server is
+    responsible for looking up the real Phase 5 score from its own DB.
+    Forwarding a score would allow devices to self-report fraudulent values.
 
     Returns a dict like:
         {"allowed": True, "trust_score": 85, "device_status": "active", "reason": "..."}
 
     On any network/timeout error the call *fails closed* (allowed=False).
     """
-    payload: dict = {"device_id": device_id, "action": action}
-    if trust_score is not None:
-        payload["trust_score"] = trust_score
+    payload = {"device_id": device_id, "action": action}
+    # No "trust_score" key in payload — ZT server derives it from DB only
 
     try:
         async with httpx.AsyncClient(timeout=ZERO_TRUST_TIMEOUT) as client:
             resp = await client.post(f"{ZERO_TRUST_URL}/rbac/verify", json=payload)
             return resp.json()
     except httpx.TimeoutException:
-        return {"allowed": False, "trust_score": 0, "reason": "Zero Trust server timeout"}
+        return {
+            "allowed":     False,
+            "trust_score": 0,
+            "reason":      "Zero Trust server timeout — failing closed"
+        }
     except Exception as e:
-        return {"allowed": False, "trust_score": 0, "reason": f"Zero Trust unreachable: {str(e)}"}
+        return {
+            "allowed":     False,
+            "trust_score": 0,
+            "reason":      f"Zero Trust unreachable: {str(e)}"
+        }
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -136,64 +147,55 @@ async def check_update(device_id: str, version: str):
     if device_id not in DEVICES:
         return {"update_available": False}
 
-    device = DEVICES[device_id]
+    device  = DEVICES[device_id]
     pending = device.get("pending_update")
 
     if pending and pending["old_version"] == version:
         return {
             "update_available": True,
-            "old_version": pending["old_version"],
-            "new_version": pending["new_version"],
-            "patch_url": f"/get_patch/{pending['old_version']}/{pending['new_version']}/{device_id}",
+            "old_version":  pending["old_version"],
+            "new_version":  pending["new_version"],
+            # NOTE: no trust_score in these URLs — ZT server uses DB only
+            "patch_url":     f"/get_patch/{pending['old_version']}/{pending['new_version']}/{device_id}",
             "signature_url": f"/get_signature/{pending['old_version']}/{pending['new_version']}"
         }
 
     return {"update_available": False}
 
 
-# ─── PATCHED endpoint — now gated by Zero Trust RBAC ─────────────────────────
+# ─── Patch endpoint — gated by Zero Trust RBAC (DB score only) ───────────────
 
 @app.get("/get_patch/{old}/{new}/{device_id}")
 async def get_patch(old: str, new: str, device_id: str, request: Request):
     """
     Serve an encrypted delta patch only after the Zero Trust server confirms
-    the device is active and has a sufficient Phase-5 trust score (≥ 70).
+    the device has a Phase 5 TRUSTED record with score >= 70 in its DB.
 
-    The optional query parameter ?trust_score=<int> lets the device forward
-    the score it received from /auth/verify-context so the RBAC call can
-    skip a DB lookup.  If omitted, the Zero Trust server will look it up from
-    its phase5_verification_log table.
+    The trust score is looked up server-side by the Zero Trust server.
+    This endpoint deliberately does NOT accept or forward a ?trust_score=
+    query parameter — doing so would allow devices to self-report scores.
 
     Flow:
-        Device  →  GET /get_patch/1.0/1.1/esp32_01?trust_score=85
-        FastAPI →  POST http://localhost:5000/rbac/verify  {"device_id": "esp32_01", "trust_score": 85}
-        ZT      →  {"allowed": true, "trust_score": 85, ...}
+        Device  →  GET /get_patch/1.0/1.1/iot-device-001
+        FastAPI →  POST http://localhost:5000/rbac/verify  {"device_id": ..., "action": "get_patch"}
+        ZT      →  DB lookup → {"allowed": true, "trust_score": 85, ...}
         FastAPI →  FileResponse(patch file)   ✓
     """
-    # ── 1. Parse optional forwarded trust score ──────────────────────────────
-    raw_score = request.query_params.get("trust_score")
-    forwarded_score: int | None = None
-    if raw_score is not None:
-        try:
-            forwarded_score = int(raw_score)
-        except ValueError:
-            pass  # ignore malformed value; ZT server will do DB lookup instead
-
-    # ── 2. RBAC check via Zero Trust server ──────────────────────────────────
-    rbac = await check_rbac(device_id, action="get_patch", trust_score=forwarded_score)
+    # ── RBAC check via Zero Trust server (no score forwarded) ────────────────
+    rbac = await check_rbac(device_id, action="get_patch")
 
     if not rbac.get("allowed", False):
         raise HTTPException(
             status_code=403,
             detail={
-                "error": "Zero Trust RBAC denied",
-                "device_id": device_id,
+                "error":       "Zero Trust RBAC denied",
+                "device_id":   device_id,
                 "trust_score": rbac.get("trust_score", 0),
-                "reason": rbac.get("reason", "Unknown"),
+                "reason":      rbac.get("reason", "Unknown"),
             }
         )
 
-    # ── 3. Serve the patch ───────────────────────────────────────────────────
+    # ── Serve the patch ───────────────────────────────────────────────────────
     patch_path = PATCHES_DIR / f"patch_{old}_to_{new}.bsdiff.enc"
 
     if not patch_path.exists():
@@ -205,7 +207,7 @@ async def get_patch(old: str, new: str, device_id: str, request: Request):
         filename=f"patch_{old}_to_{new}.bsdiff.enc",
         headers={
             "X-Trust-Score": str(rbac.get("trust_score", 0)),
-            "X-ZT-Result": "allowed"
+            "X-ZT-Result":   "allowed"
         }
     )
 
@@ -264,7 +266,7 @@ async def api_patches():
                 patches.append({
                     "old_version": key[0],
                     "new_version": key[1],
-                    "enc_size": f.stat().st_size,
+                    "enc_size":    f.stat().st_size,
                     "has_signature": sig.exists(),
                 })
     return {"patches": sorted(patches, key=lambda x: (x["old_version"], x["new_version"]))}
