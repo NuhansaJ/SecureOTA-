@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 
 const API = '/api'
+const LATEST_FIRMWARE_URL = 'http://13.63.176.124:9000/firmware/download/test_firmware.bin'
 const STEPS = [
   { id: 0, title: 'Overview', short: 'Overview' },
   { id: 1, title: 'Upload firmware', short: 'Firmware' },
@@ -254,6 +255,9 @@ function App() {
                   </section>
                 </div>
                 <div className="wizard-actions">
+                  <a href={LATEST_FIRMWARE_URL} target="_blank" rel="noopener noreferrer" className="btn secondary">
+                    Download latest firmware
+                  </a>
                   <button type="button" className="btn" onClick={() => goToStep(1)}>
                     Start wizard →
                   </button>
